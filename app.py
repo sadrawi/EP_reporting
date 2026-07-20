@@ -296,11 +296,15 @@ def build_pdf(act, raw, flags, source_note, drop_status, n_dropped, mk_overload)
 
     story.append(Paragraph("1. Ringkasan Umum", H2))
     rows = [["Metrik", "Nilai"],
-            ["Jumlah aktivitas (setelah filter)", str(n_act)],
-            ["Jumlah mahasiswa (NIM unik)", str(n_stu)],
-            ["Baris pada file ekspor asli", str(len(raw))],
-            ["Record dikecualikan (%s)" % (", ".join(drop_status) or "-"), str(n_dropped)],
-            ["Aktivitas dengan isu data per-record", str(n_issue)]]
+            ["Jumlah aktivitas (setelah filter)", str(n_act)]]
+    
+    # rows = [["Metrik", "Nilai"],
+    #         ["Jumlah aktivitas (setelah filter)", str(n_act)],
+    #         ["Jumlah mahasiswa (NIM unik)", str(n_stu)],
+    #         ["Baris pada file ekspor asli", str(len(raw))],
+    #         ["Record dikecualikan (%s)" % (", ".join(drop_status) or "-"), str(n_dropped)],
+    #         ["Aktivitas dengan isu data per-record", str(n_issue)]]
+    
     t = Table(rows, colWidths=[120 * mm, 45 * mm]); t.setStyle(tstyle(numeric_cols=[1])); story.append(t)
 
     story.append(Paragraph("2. Rekap per Jenis Aktivitas", H2))
@@ -377,10 +381,10 @@ n_issue = int(pd.concat([flags[k] for k in RECORD_FLAGS], axis=1).any(axis=1).su
 
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Aktivitas", n_act)
-m2.metric("Mahasiswa", n_stu)
-m3.metric("Baris asli", len(raw))
-m4.metric("Dikecualikan", n_dropped)
-m5.metric("Isu per-record", n_issue)
+# m2.metric("Mahasiswa", n_stu)
+# m3.metric("Baris asli", len(raw))
+# m4.metric("Dikecualikan", n_dropped)
+# m5.metric("Isu per-record", n_issue)
 
 tab_sum, tab_jenis, tab_prodi, tab_flag, tab_matrix, tab_dl = st.tabs(
     ["Ringkasan", "Per Jenis", "Per Program Studi", "Flag", "Matriks", "Unduh"])
