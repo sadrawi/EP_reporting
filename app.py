@@ -295,15 +295,13 @@ def build_pdf(act, raw, flags, source_note, drop_status, n_dropped, mk_overload)
     story.append(HRFlowable(width="100%", thickness=1.2, color=navy, spaceAfter=2))
 
     story.append(Paragraph("1. Ringkasan Umum", H2))
-    rows = [["Metrik", "Nilai"],
-            ["Jumlah aktivitas (setelah filter)", str(n_act)]]
     
-    # rows = [["Metrik", "Nilai"],
-    #         ["Jumlah aktivitas (setelah filter)", str(n_act)],
-    #         ["Jumlah mahasiswa (NIM unik)", str(n_stu)],
-    #         ["Baris pada file ekspor asli", str(len(raw))],
-    #         ["Record dikecualikan (%s)" % (", ".join(drop_status) or "-"), str(n_dropped)],
-    #         ["Aktivitas dengan isu data per-record", str(n_issue)]]
+    rows = [["Metrik", "Nilai"],
+            ["Jumlah aktivitas (setelah filter)", str(n_act)],
+            ["Jumlah mahasiswa (NIM unik)", str(n_stu)],
+            ["Baris pada file ekspor asli", str(len(raw))],
+            ["Record dikecualikan (%s)" % (", ".join(drop_status) or "-"), str(n_dropped)],
+            ["Aktivitas dengan isu data per-record", str(n_issue)]]
     
     t = Table(rows, colWidths=[120 * mm, 45 * mm]); t.setStyle(tstyle(numeric_cols=[1])); story.append(t)
 
