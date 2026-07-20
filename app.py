@@ -421,9 +421,9 @@ with tab_prodi:
 
 with tab_flag:
     st.subheader("Flag kualitas data")
-    cols = st.columns(5)
+    cols = st.columns(6)
     for i, k in enumerate(FLAG_COLS):
-        cols[i % 5].metric(k, int(flags[k].sum()), help=defs[k])
+        cols[i % 6].metric(k, int(flags[k].sum()), help=defs[k])
     st.divider()
     flag_pick = st.selectbox("Lihat record untuk flag", FLAG_COLS)
     st.caption(defs[flag_pick])
