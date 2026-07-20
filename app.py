@@ -412,10 +412,26 @@ with tab_jenis:
 with tab_prodi:
     st.subheader("Rekap mahasiswa per Program Studi")
     stu_p = act.groupby("Program Studi")["NIM"].nunique().sort_values(ascending=False)
-    stu_p.index = [prodi_label(p) for p in stu_p.index]
-    st.pyplot(barh(stu_p, NAVY, "Mahasiswa per Program Studi"))
-    prodi_pick = st.selectbox("Lihat daftar mahasiswa untuk Program Studi",
-                              act.groupby("Program Studi")["NIM"].nunique().sort_values(ascending=False).index)
+
+    # tabel rekap (bisa diunduh)
+    rekap_p = stu_p.rename("Mahasiswa").reset_index()
+    rekap_p["Program Studi"] = rekap_p["Program Studi"].map(prodi_label)
+    rekap_p = pd.concat(
+        [rekap_p, pd.DataFrame([{"Program Studi": "TOTAL", "Mahasiswa": int(stu_p.sum())}])],
+        ignore_index=True)
+
+    stu_chart = stu_p.copy()
+    stu_chart.index = [prodi_label(p) for p in stu_chart.index]
+    st.pyplot(barh(stu_chart, NAVY, "Mahasiswa per Program Studi"))
+
+    st.dataframe(rekap_p, use_container_width=True, hide_index=True)
+    st.download_button("⬇️ Unduh rekap per Program Studi (CSV)",
+                       rekap_p.to_csv(index=False).encode("utf-8"),
+                       file_name="rekap_mahasiswa_per_prodi.csv", mime="text/csv",
+                       key="dl_rekap_prodi")
+
+    # daftar mahasiswa per prodi (drill-down)
+    prodi_pick = st.selectbox("Lihat daftar mahasiswa untuk Program Studi", stu_p.index)
     sub = act[act["Program Studi"] == prodi_pick]
     st.caption("%d aktivitas, %d mahasiswa" % (len(sub), sub["NIM"].nunique()))
     st.dataframe(sub[["NIM", "Nama", "Jenis Aktivitas", "Status Aktivitas", "Mitra", "Judul Aktivitas"]]
