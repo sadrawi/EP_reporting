@@ -413,7 +413,7 @@ with tab_prodi:
     st.subheader("Rekap mahasiswa per Program Studi")
     stu_p = act.groupby("Program Studi")["NIM"].nunique().sort_values(ascending=False)
 
-    # tabel rekap (bisa diunduh)
+    # --- tabel rekap + unduh ---
     rekap_p = stu_p.rename("Mahasiswa").reset_index()
     rekap_p["Program Studi"] = rekap_p["Program Studi"].map(prodi_label)
     rekap_p = pd.concat(
@@ -430,12 +430,20 @@ with tab_prodi:
                        file_name="rekap_mahasiswa_per_prodi.csv", mime="text/csv",
                        key="dl_rekap_prodi")
 
-    # daftar mahasiswa per prodi (drill-down)
+    st.divider()
+
+    # --- daftar mahasiswa per prodi (drill-down) + unduh ---
     prodi_pick = st.selectbox("Lihat daftar mahasiswa untuk Program Studi", stu_p.index)
-    sub = act[act["Program Studi"] == prodi_pick]
+    sub = act[act["Program Studi"] == prodi_pick].reset_index(drop=True)
+    sub_show = sub[["NIM", "Nama", "Jenis Aktivitas", "Status Aktivitas", "Mitra", "Judul Aktivitas"]]
     st.caption("%d aktivitas, %d mahasiswa" % (len(sub), sub["NIM"].nunique()))
-    st.dataframe(sub[["NIM", "Nama", "Jenis Aktivitas", "Status Aktivitas", "Mitra", "Judul Aktivitas"]]
-                 .reset_index(drop=True), use_container_width=True)
+    st.dataframe(sub_show, use_container_width=True, hide_index=True)
+
+    slug = prodi_label(prodi_pick).replace(" ", "_")
+    st.download_button("⬇️ Unduh daftar mahasiswa (CSV)",
+                       sub_show.to_csv(index=False).encode("utf-8"),
+                       file_name="mahasiswa_%s.csv" % slug, mime="text/csv",
+                       key="dl_students_prodi")
 
 with tab_flag:
     st.subheader("Flag kualitas data")
