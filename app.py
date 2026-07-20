@@ -340,8 +340,9 @@ def build_pdf(act, raw, flags, source_note, drop_status, n_dropped, mk_overload)
 # ================================================================ UI
 st.set_page_config(page_title="Analisis MBKM", page_icon="🎓", layout="wide")
 st.title("Analisis Aktivitas MBKM & Mata Kuliah Konversi")
-st.caption("Unggah file ekspor SIAKAD (.xls / .xlsx). Data dinormalkan ke 1 baris per aktivitas, "
-           "lalu diberi flag kualitas data.")
+# st.caption("Unggah file ekspor SIAKAD (.xls / .xlsx). Data dinormalkan ke 1 baris per aktivitas, "
+#            "lalu diberi flag kualitas data.")
+st.caption("Supported by Claude Opus 4.8 (Anthropic PBC, San Francisco, California, U.S.) ")
 
 up = st.file_uploader("File ekspor SIAKAD", type=["xls", "xlsx", "html", "htm"])
 if up is None:
