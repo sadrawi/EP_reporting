@@ -1865,7 +1865,7 @@ def stacked_barh_png(table, colors, end_labels, xlabel):
     xmax = max(lefts) if n else 1.0
     for y, total, cat in zip(ypos, lefts, table.index):
         plt.text(total + xmax * 0.012, y, end_labels[cat], ha="left", va="center",
-                 fontsize=8, color=INK, zorder=4)
+                 fontsize=8, fontweight="bold", color=INK, zorder=4)
     plt.yticks(ypos, list(table.index), fontsize=8.5, color=INK2)
     plt.xticks(fontsize=7.5, color=MUTED)
     plt.xlim(0, xmax * 1.2)
