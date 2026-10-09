@@ -125,6 +125,39 @@ def is_dup_status(name):
     return str(name).endswith(DUP_SUFFIX)
 
 
+IN_PROGRESS = ["Evaluasi", "Diajukan"]
+
+
+def uncounted_records(act_all, drop_status):
+    """Aktivitas yang belum selesai (Evaluasi/Diajukan) tetapi tidak dihitung karena statusnya dibuang filter
+    (mis. bila hanya status Selesai yang dihitung). Tetap dilaporkan sebagai aktivitas yang belum selesai."""
+    if act_all is None:
+        return None
+    keep = []
+    for s in drop_status or []:
+        if s in IN_PROGRESS:
+            keep.append(s)
+    return act_all[act_all["Status Aktivitas"].isin(keep)]
+
+
+def unc_part(unc, col=None, value=None):
+    """Bagian dari aktivitas tak terhitung untuk satu kelompok (aman bila unc None)."""
+    if unc is None or col is None:
+        return unc
+    return unc[unc[col] == value]
+
+
+def unc_len(unc):
+    return 0 if unc is None else len(unc)
+
+
+def with_uncounted(act, unc):
+    """Aktivitas terhitung + aktivitas belum selesai yang tidak dihitung (untuk tampilan status)."""
+    if unc is None or len(unc) == 0:
+        return act
+    return pd.concat([act, unc], ignore_index=True)
+
+
 DEFAULT_COHORTS = ["22", "23"]
 
 
@@ -811,21 +844,31 @@ def not_done_tables(act, act_all, drop_status, lang="id"):
             cells = [sem_label(r["Periode Akademik"], lang, ay, "cell")] + cells
         return cells
 
+    unc = uncounted_records(act_all, drop_status)
     pending_rows = []
     for _, r in act[act["Status Aktivitas"] != "Selesai"].iterrows():
         pending_rows.append((order_key(r), lead_cells(r)))
+    if unc is not None:
+        for _, r in unc.iterrows():
+            pending_rows.append((order_key(r), lead_cells(r)))
     pending_rows.sort(key=lambda x: x[0])
     pending = []
     for key, cells in pending_rows:
         pending.append(cells)
+    still = with_uncounted(act, unc)
     excluded_rows = []
     if act_all is not None and drop_status:
-        for _, r in act_all[act_all["Status Aktivitas"].isin(drop_status)].iterrows():
-            others = []
-            for _, o in act[act["NIM"] == r["NIM"]].iterrows():
+        gone = act_all[act_all["Status Aktivitas"].isin(drop_status) & ~act_all["Status Aktivitas"].isin(IN_PROGRESS)]
+        for _, r in gone.iterrows():
+            found = []
+            for _, o in still[still["NIM"] == r["NIM"]].iterrows():
                 text = "%s - %s" % (jenis_short(o["Jenis Aktivitas"], lang), status_name(o["Status Aktivitas"], lang))
                 if with_period:
                     text += " (%s)" % sem_label(o["Periode Akademik"], lang, ay, "cell")
+                found.append((period_sort_key(o["Periode Akademik"]), text))
+            found.sort(key=lambda x: x[0])
+            others = []
+            for key, text in found:
                 others.append(text)
             excluded_rows.append((order_key(r), lead_cells(r) + ["; ".join(others) if others else "-"]))
     excluded_rows.sort(key=lambda x: x[0])
@@ -850,7 +893,7 @@ def build_excel(act, flags, nim_info, act_all=None, drop_status=None):
         table.to_excel(xl, sheet_name="Aktivitas", index=False)
         if multi_sem:
             cats = partner_categories(act, flags)
-            semester_compare_table(act, cats, flags, "id").to_excel(xl, sheet_name="Per Semester", index=False)
+            semester_compare_table(act, cats, flags, "id", uncounted_records(act_all, drop_status)).to_excel(xl, sheet_name="Per Semester", index=False)
             rekap_sem(act, "Jenis Aktivitas", periods).to_excel(xl, sheet_name="Per Jenis", index=False)
             rekap_sem(act, "Program Studi", periods).to_excel(xl, sheet_name="Per Prodi", index=False)
         else:
@@ -979,7 +1022,19 @@ def build_pdf(act, raw, flags, nim_info, meta):
     if len(multi):
         multi_text = "%d NIM (%d aktivitas)" % (len(multi), int(multi["Jml Aktivitas"].sum()))
     n_issue = int(pd.concat([flags[k] for k in RECORD_FLAGS], axis=1).any(axis=1).sum())
-    status_ct = act["Status Aktivitas"].value_counts()
+    unc = uncounted_records(meta.get("act_all"), meta["drop_status"])
+    reg = with_uncounted(act, unc)
+    status_ct = reg["Status Aktivitas"].value_counts()
+    counted_status = set(act["Status Aktivitas"])
+    unc_note = []
+    if unc_len(unc):
+        unc_note = [Paragraph("(tidak dihitung) = aktivitas yang belum selesai; dilaporkan di bagian 7 tetapi tidak "
+                              "termasuk angka laporan.", SMALL)]
+
+    def status_cell(s):
+        if unc_len(unc) and s not in counted_status:
+            return s + " (tidak dihitung)"
+        return s
 
     story.append(Paragraph("Laporan Analisis Aktivitas MBKM &amp; Mata Kuliah Konversi", H1))
     story.append(Paragraph("Indonesia International Institute for Life Sciences (i3L)", SUB))
@@ -1097,9 +1152,9 @@ def build_pdf(act, raw, flags, nim_info, meta):
         # 4. Status per semester
         rows = [["Status"] + periods + ["Total"]]
         for s in status_ct.index:
-            row = [s]
+            row = [status_cell(s)]
             for p in periods:
-                row.append(str(int(((act["Periode Akademik"] == p) & (act["Status Aktivitas"] == s)).sum())))
+                row.append(str(int(((reg["Periode Akademik"] == p) & (reg["Status Aktivitas"] == s)).sum())))
             row.append(str(int(status_ct[s])))
             rows.append(row)
         t = Table(rows, colWidths=mm_list(widths_status(len(periods))))
@@ -1107,7 +1162,7 @@ def build_pdf(act, raw, flags, nim_info, meta):
         style.add("ALIGN", (1, 0), (-1, 0), "CENTER")
         style.add("FONTNAME", (-1, 1), (-1, -1), "Helvetica-Bold")
         t.setStyle(style)
-        section("4. Status Aktivitas", [t])
+        section("4. Status Aktivitas", [t] + unc_note)
 
         # 5. Flag per semester (header semester dibungkus agar muat di kolom sempit)
         head = ["Flag"]
@@ -1181,10 +1236,10 @@ def build_pdf(act, raw, flags, nim_info, meta):
         # 4. Status
         rows = [["Status", "Aktivitas"]]
         for s in status_ct.index:
-            rows.append([s, str(int(status_ct[s]))])
+            rows.append([status_cell(s), str(int(status_ct[s]))])
         t = Table(rows, colWidths=[130 * mm, 35 * mm])
         t.setStyle(tstyle(numeric_cols=[1]))
-        section("4. Status Aktivitas", [t])
+        section("4. Status Aktivitas", [t] + unc_note)
 
         # 5. Flag
         rows = [["Flag", "Jml", "Definisi"]]
@@ -1266,13 +1321,16 @@ def build_pdf(act, raw, flags, nim_info, meta):
         parts = []
         for s in sorted(counts.index, key=status_rank):
             parts.append("%d %s" % (counts[s], s))
-        text = ("%d aktivitas (%d mahasiswa) belum berstatus Selesai: %s."
-                % (len(pending), pending["NIM"].nunique(), ", ".join(parts)))
+        extra = ""
+        if unc_len(unc) == len(pending):
+            extra = " dan tidak dihitung dalam angka laporan ini"
+        text = ("%d aktivitas (%d mahasiswa) belum berstatus Selesai%s: %s."
+                % (len(pending), pending["NIM"].nunique(), extra, ", ".join(parts)))
         if multi_sem:
             sem_parts = []
             for p in periods:
-                sem_parts.append("%s %d" % (p, int(((act["Periode Akademik"] == p)
-                                                      & (act["Status Aktivitas"] != "Selesai")).sum())))
+                sem_parts.append("%s %d" % (p, int(((reg["Periode Akademik"] == p)
+                                                      & (reg["Status Aktivitas"] != "Selesai")).sum())))
             text += " Per semester: %s." % ", ".join(sem_parts)
         items.append(Paragraph(text, CELL))
         items.append(Spacer(1, 4))
@@ -1280,8 +1338,13 @@ def build_pdf(act, raw, flags, nim_info, meta):
                                         tstyle(pad=4)))
     if len(excluded):
         items.append(Spacer(1, 6))
+        gone = []
+        for s in meta["drop_status"]:
+            if s not in IN_PROGRESS:
+                gone.append(s)
+        gone.sort(key=drop_order)
         items.append(Paragraph("Record yang dikecualikan oleh filter (%s): %d record."
-                               % (", ".join(meta["drop_status"]), len(excluded)), CELL))
+                               % (", ".join(gone), len(excluded)), CELL))
         items.append(Spacer(1, 4))
         items.append(not_done_pdf_table(excluded, fit_widths_mm(excluded, 165, 7.6, 4), CELL, "Helvetica-Bold",
                                         tstyle(header_bg=red, pad=4)))
@@ -2281,9 +2344,131 @@ def composition_sentence(comp, lang):
             % (len(comp), join(shown, lang), rest))
 
 
+def drop_order(s):
+    """Urutan tampil status yang dibuang: Ditolak, Dibatalkan, lalu duplikat."""
+    base = str(s)[:-len(DUP_SUFFIX)] if is_dup_status(s) else s
+    rank = STATUS_ORDER.index(base) if base in STATUS_ORDER else len(STATUS_ORDER)
+    return (1 if is_dup_status(s) else 0, rank)
+
+
+def split_drop(meta):
+    """(status belum selesai yang tidak dihitung, status lain yang dikecualikan) dari daftar filter."""
+    unc_status = []
+    for s in IN_PROGRESS:
+        if s in meta["drop_status"]:
+            unc_status.append(s)
+    others = []
+    for s in meta["drop_status"]:
+        if s not in IN_PROGRESS:
+            others.append(s)
+    others.sort(key=drop_order)
+    return unc_status, others
+
+
+def uncounted_sentence(meta, unc, lang):
+    """Kalimat cakupan angka bila aktivitas belum selesai tidak dihitung (mis. hanya Selesai yang dihitung)."""
+    unc_status, others = split_drop(meta)
+    present = []
+    for s in unc_status:
+        if s in set(unc["Status Aktivitas"]):
+            present.append(s)
+    n_unc = len(unc)
+    n_other = meta["n_dropped"] - n_unc
+    if lang == "en":
+        states = []
+        for s in present:
+            states.append(status_state(s))
+        text = (" Activities not yet completed (%d %s %s) are not counted in these figures"
+                % (n_unc, plural(n_unc, "activity", "activities"), join_or(states)))
+        if n_other:
+            names = []
+            for s in others:
+                names.append(status_name(s, lang))
+            text += ", nor are %d %s with status %s" % (n_other, plural(n_other, "record", "records"), join_or(names))
+        return text + "."
+    text = (" Aktivitas yang belum selesai (%d aktivitas berstatus %s) tidak dihitung dalam angka ini"
+            % (n_unc, join_or_id(present)))
+    if n_other:
+        text += ", demikian pula %d record berstatus %s" % (n_other, join_or_id(others))
+    return text + "."
+
+
+def status_text(status, n_act, unc, lang):
+    """Kalimat status; bila ada aktivitas belum selesai yang tidak dihitung, keduanya disebut."""
+    n_unc = unc_len(unc)
+    if n_unc == 0:
+        return status_sentence(status, n_act, lang)
+    en = lang == "en"
+    total = n_act + n_unc
+    n_done = int(status.get("Selesai", 0))
+    counted_other = []
+    for name, n in ranked(status):
+        if name != "Selesai":
+            counted_other.append(("%d %s %s" % (n, plural(n, "is", "are"), status_state(name))) if en
+                                 else ("%d berstatus %s" % (n, name)))
+    unc_items = []
+    for name, n in sorted(unc["Status Aktivitas"].value_counts().items(), key=lambda x: status_rank(x[0])):
+        unc_items.append(("%d %s %s" % (n, plural(n, "is", "are"), status_state(name))) if en
+                         else ("%d berstatus %s" % (n, name)))
+    if en:
+        text = ("Of the %d recorded activities, %d (%s) %s been completed"
+                % (total, n_done, pct(n_done, total, lang), plural(n_done, "has", "have")))
+        if counted_other:
+            text += ", while " + join(counted_other, lang)
+        return text + "; %s, so %s not counted in this report's figures." % (join(unc_items, lang),
+                                                                            plural(n_unc, "it is", "they are"))
+    text = ("Dari %d aktivitas yang tercatat, %d (%s) telah berstatus Selesai"
+            % (total, n_done, pct(n_done, total, lang)))
+    if counted_other:
+        text += ", sementara " + join(counted_other, lang)
+    return text + "; %s belum selesai sehingga tidak dihitung dalam angka laporan ini." % join(unc_items, lang)
+
+
+def counting_scope(meta, lang):
+    """Kalimat metode tentang status yang dihitung bila aktivitas belum selesai tidak dihitung."""
+    unc_status, others = split_drop(meta)
+    kept = []
+    act_all = meta.get("act_all")
+    if act_all is not None:
+        present = set(act_all["Status Aktivitas"])
+        for s in STATUS_ORDER:
+            if s in present and s not in meta["drop_status"]:
+                kept.append(s)
+    en = lang == "en"
+    if en:
+        if kept == ["Selesai"]:
+            text = "Only completed activities (Selesai) are counted."
+        else:
+            names = []
+            for s in kept:
+                names.append("%s (%s)" % (status_name(s, lang), s))
+            text = "Activities with status %s are counted." % join_or(names)
+        states = []
+        for s in unc_status:
+            states.append("%s (%s)" % (status_state(s), s))
+        text += " Activities %s are reported separately as not yet completed" % join_or(states)
+        if others:
+            names = []
+            for s in others:
+                names.append(status_name(s, lang))
+            text += ", while records with status %s are excluded from the analysis" % join_or(names)
+        return text + "."
+    if kept == ["Selesai"]:
+        text = "Hanya aktivitas berstatus Selesai yang dihitung."
+    else:
+        text = "Aktivitas yang dihitung adalah yang berstatus %s." % join_or_id(kept)
+    text += " Aktivitas berstatus %s dilaporkan terpisah sebagai aktivitas yang belum selesai" % join_or_id(unc_status)
+    if others:
+        text += ", sedangkan record berstatus %s dikecualikan dari analisis" % join_or_id(others)
+    return text + "."
+
+
 def dropped_sentence(meta, lang):
     if not meta["n_dropped"]:
         return ""
+    unc = uncounted_records(meta.get("act_all"), meta["drop_status"])
+    if unc_len(unc):
+        return uncounted_sentence(meta, unc, lang)
     if lang == "en":
         statuses = []
         for s in meta["drop_status"]:
@@ -2389,7 +2574,7 @@ def summary_opening_multi(act, nim_info, meta, periods, n_prodi, lang, sec_no):
     return text + " Jumlah aktivitas lebih besar daripada jumlah mahasiswa karena " + join(reasons, lang) + "."
 
 
-def summary_paragraphs(act, cats, flags, nim_info, meta, prodi_counts, jenis_counts, lang, sec_no):
+def summary_paragraphs(act, cats, flags, nim_info, meta, prodi_counts, jenis_counts, lang, sec_no, unc=None):
     en = lang == "en"
     n_act = len(act)
     n_stu = act["NIM"].nunique()
@@ -2444,7 +2629,7 @@ def summary_paragraphs(act, cats, flags, nim_info, meta, prodi_counts, jenis_cou
             parts.append("%s %s a valid partner name" % (acts(prof["n_bad"], lang), plural(prof["n_bad"], "lacks", "lack")))
         else:
             parts.append("%d aktivitas belum mencantumkan mitra yang valid" % prof["n_bad"])
-    p3 = status_sentence(prof["status"], n_act, lang)
+    p3 = status_text(prof["status"], n_act, unc, lang)
     if parts:
         p3 += (" A total of " if en else " Sebanyak ") + join(parts, lang) + "."
     if prof["n_ext"]:
@@ -2505,7 +2690,7 @@ def semester_split_sentence(sub, periods, lang):
     return text
 
 
-def prodi_story(act, cats, flags, mk_names, prodi_counts, n_stu_all, lang, periods=None):
+def prodi_story(act, cats, flags, mk_names, prodi_counts, n_stu_all, lang, periods=None, unc=None):
     multi = periods is not None and len(periods) > 1
     stories = []
     for p, n_stu in prodi_counts:
@@ -2524,7 +2709,7 @@ def prodi_story(act, cats, flags, mk_names, prodi_counts, n_stu_all, lang, perio
         if multi:
             sentences.append(semester_split_sentence(sub, periods, lang))
         sentences.append(mix_sentence(sub, n_stu, lang))
-        sentences.append(status_sentence(prof["status"], prof["n_act"], lang))
+        sentences.append(status_text(prof["status"], prof["n_act"], unc_part(unc, "Program Studi", p), lang))
         para1 = " ".join(sentences)
         para2 = " ".join(partner_sentences(prof, lang) + [conversion_sentence(prof, mk_names, lang),
                                                           data_note(prof, "prodi", lang, multi)])
@@ -2532,7 +2717,7 @@ def prodi_story(act, cats, flags, mk_names, prodi_counts, n_stu_all, lang, perio
     return stories
 
 
-def jenis_story(act, cats, flags, mk_names, jenis_counts, n_stu_all, lang, periods=None):
+def jenis_story(act, cats, flags, mk_names, jenis_counts, n_stu_all, lang, periods=None, unc=None):
     multi = periods is not None and len(periods) > 1
     stories = []
     for j, n_stu in jenis_counts:
@@ -2555,7 +2740,7 @@ def jenis_story(act, cats, flags, mk_names, jenis_counts, n_stu_all, lang, perio
         if multi:
             sentences.append(semester_split_sentence(sub, periods, lang))
         sentences.append(composition_sentence(comp, lang))
-        sentences.append(status_sentence(prof["status"], prof["n_act"], lang))
+        sentences.append(status_text(prof["status"], prof["n_act"], unc_part(unc, "Jenis Aktivitas", j), lang))
         para1 = " ".join(sentences)
         para2 = " ".join(partner_sentences(prof, lang) + [conversion_sentence(prof, mk_names, lang),
                                                           data_note(prof, "jenis", lang, multi)])
@@ -2780,6 +2965,8 @@ def method_paragraph(meta, lang, periods=None):
                     % (join_or(statuses), ", ".join(meta["drop_status"])))
         else:
             drop = "No activity status is excluded."
+        if split_drop(meta)[0]:
+            drop = counting_scope(meta, lang)
         if any_dup(meta["drop_status"]):
             drop += (" \"Duplicate\" marks a submission (Diajukan/Evaluasi) that converts the same course as a completed "
                      "activity of the same student in the same semester.")
@@ -2805,6 +2992,8 @@ def method_paragraph(meta, lang, periods=None):
         drop = "Record berstatus %s dikecualikan dari analisis." % join(meta["drop_status"], lang)
     else:
         drop = "Tidak ada status aktivitas yang dikecualikan."
+    if split_drop(meta)[0]:
+        drop = counting_scope(meta, lang)
     if any_dup(meta["drop_status"]):
         drop += (" Status \"duplikat\" diberikan pada pengajuan (Diajukan/Evaluasi) yang mengonversi MK yang sama "
                  "dengan aktivitas Selesai milik mahasiswa yang sama pada semester yang sama.")
@@ -2833,9 +3022,11 @@ def pending_paragraphs(act, meta, lang, pending, excluded, t_pending=1, t_exclud
         paras.append("All analysed activities have been completed." if en
                      else "Semua aktivitas yang dianalisis telah berstatus Selesai.")
     else:
-        raw_pending = act[act["Status Aktivitas"] != "Selesai"]
+        unc = uncounted_records(meta.get("act_all"), meta["drop_status"])
+        raw_pending = with_uncounted(act[act["Status Aktivitas"] != "Selesai"], unc)
         n_rec = len(raw_pending)
         n_stu = raw_pending["NIM"].nunique()
+        not_counted = unc_len(unc) == n_rec
         parts = []
         for s, n in sorted(raw_pending["Status Aktivitas"].value_counts().items(), key=lambda x: status_rank(x[0])):
             if en:
@@ -2847,17 +3038,19 @@ def pending_paragraphs(act, meta, lang, pending, excluded, t_pending=1, t_exclud
             by_prodi.append("%s (%d)" % (prodi_label(p), n))
         if en:
             who = acts(n_rec, lang) if n_rec == n_stu else "%s belonging to %s" % (acts(n_rec, lang), studs(n_stu, lang))
-            text = ("A total of %s %s not yet been completed: %s. They are listed in Table %d so that study programs "
-                    "and supervisors can follow up. By study program: %s."
-                    % (who, plural(n_rec, "has", "have"), join(parts, lang), t_pending, join(by_prodi, lang)))
+            extra = (" and %s not counted in this report's figures" % plural(n_rec, "is", "are")) if not_counted else ""
+            text = ("A total of %s %s not yet been completed%s: %s. They are listed in Table %d so that study "
+                    "programs and supervisors can follow up. By study program: %s."
+                    % (who, plural(n_rec, "has", "have"), extra, join(parts, lang), t_pending, join(by_prodi, lang)))
         else:
             if n_rec == n_stu:
                 who = "%d aktivitas mahasiswa" % n_rec
             else:
                 who = "%d aktivitas milik %d mahasiswa" % (n_rec, n_stu)
-            text = ("Sebanyak %s belum berstatus Selesai: %s. Daftarnya tercantum pada Tabel %d agar dapat "
+            extra = " dan tidak dihitung dalam angka laporan ini" if not_counted else ""
+            text = ("Sebanyak %s belum berstatus Selesai%s: %s. Daftarnya tercantum pada Tabel %d agar dapat "
                     "ditindaklanjuti oleh program studi dan dosen pembimbing. Menurut program studi: %s."
-                    % (who, join(parts, lang), t_pending, join(by_prodi, lang)))
+                    % (who, extra, join(parts, lang), t_pending, join(by_prodi, lang)))
         if len(periods) > 1:
             ay = academic_year(periods)
             sem_items = []
@@ -2871,8 +3064,13 @@ def pending_paragraphs(act, meta, lang, pending, excluded, t_pending=1, t_exclud
         other_col = excluded.columns[-1]
         with_other = int((excluded[other_col] != "-").sum())
         no_other = excluded[excluded[other_col] == "-"]["NIM"].nunique()
-        statuses = []
+        shown_status = []
         for s in meta["drop_status"]:
+            if s not in IN_PROGRESS:
+                shown_status.append(s)
+        shown_status.sort(key=drop_order)
+        statuses = []
+        for s in shown_status:
             statuses.append(status_name(s, lang))
         scope_en = "in this period"
         scope_id = "pada periode ini"
@@ -2895,15 +3093,16 @@ def pending_paragraphs(act, meta, lang, pending, excluded, t_pending=1, t_exclud
             text = ("Selain itu, %d record berstatus %s dikecualikan dari analisis (Tabel %d). Sebanyak %d di "
                     "antaranya milik mahasiswa yang masih memiliki aktivitas lain yang tercatat, sedangkan %d "
                     "mahasiswa tidak memiliki aktivitas MBKM lain %s."
-                    % (len(excluded), join(meta["drop_status"], lang), t_excluded, with_other, no_other, scope_id))
+                    % (len(excluded), join(shown_status, lang), t_excluded, with_other, no_other, scope_id))
         paras.append(text)
     return paras
 
 
-def compare_values(sub, cats, flags, lang):
+def compare_values(sub, cats, flags, lang, unc_sub=None):
     """Nilai kolom tabel perbandingan semester (urutan sama dengan COMPARE_ROWS)."""
     prof = group_profile(sub, cats, flags)
     n_done = int(prof["status"].get("Selesai", 0))
+    n_unc = unc_len(unc_sub)
     issues = 0
     if len(sub):
         issues = int(flags.loc[sub.index, RECORD_FLAGS].any(axis=1).sum())
@@ -2911,12 +3110,12 @@ def compare_values(sub, cats, flags, lang):
     if prof["n_ext"]:
         mou = "%d (%s)" % (prof["n_mou"], pct(prof["n_mou"], prof["n_ext"], lang))
     return [num(prof["n_stu"], lang), num(prof["n_act"], lang), num(sub["Program Studi"].nunique(), lang),
-            "%d (%s)" % (n_done, pct(n_done, prof["n_act"], lang)), num(prof["n_act"] - n_done, lang),
+            "%d (%s)" % (n_done, pct(n_done, prof["n_act"] + n_unc, lang)), num(prof["n_act"] - n_done + n_unc, lang),
             num(len(prof["partners"]), lang), num(prof["n_ext"], lang), mou, num(prof["n_int"], lang),
             num(prof["sks_total"], lang), num(prof["sks_avg"], lang), num(issues, lang)]
 
 
-def semester_compare_table(act, cats, flags, lang):
+def semester_compare_table(act, cats, flags, lang, unc=None):
     """Tabel indikator utama: satu kolom per semester + kolom Total (mahasiswa = NIM unik)."""
     periods = sorted_periods(act["Periode Akademik"].unique())
     ay = academic_year(periods)
@@ -2924,14 +3123,19 @@ def semester_compare_table(act, cats, flags, lang):
     values = []
     for p in periods:
         columns.append(sem_label(p, lang, ay, "col"))
-        values.append(compare_values(act[act["Periode Akademik"] == p], cats, flags, lang))
+        values.append(compare_values(act[act["Periode Akademik"] == p], cats, flags, lang,
+                                     unc_part(unc, "Periode Akademik", p)))
     total = "Total"
     if ay:
         total = ("Total %s" % ay) if lang == "en" else ("Total TA %s" % ay)
     columns.append(total)
-    values.append(compare_values(act, cats, flags, lang))
+    values.append(compare_values(act, cats, flags, lang, unc))
     rows = []
     for i, name in enumerate(COMPARE_ROWS[lang]):
+        if unc_len(unc) and i == 3:
+            name += " (% of recorded)" if lang == "en" else " (% dari yang tercatat)"
+        if unc_len(unc) and i == 4:
+            name += " (not counted)" if lang == "en" else " (tidak dihitung)"
         row = [name]
         for col_values in values:
             row.append(col_values[i])
@@ -2991,7 +3195,7 @@ def top_by_semester(subs, col, label, lang, ay, kind):
     return lead + join(items, lang) + "."
 
 
-def semester_section(act, cats, flags, lang, numbers):
+def semester_section(act, cats, flags, lang, numbers, unc=None):
     """Bagian perbandingan semester: 4 paragraf, tabel indikator, dan tabel mahasiswa lintas semester."""
     en = lang == "en"
     T = NARR_TEXT[lang]
@@ -3099,7 +3303,8 @@ def semester_section(act, cats, flags, lang, numbers):
         prof = group_profile(sub, cats, flags)
         where = sem_label(p, lang, ay, "text")
         n_done = int(prof["status"].get("Selesai", 0))
-        done_items.append(("%s in %s" if en else "%s pada %s") % (pct(n_done, prof["n_act"], lang), where))
+        n_reg = prof["n_act"] + unc_len(unc_part(unc, "Periode Akademik", p))
+        done_items.append(("%s in %s" if en else "%s pada %s") % (pct(n_done, n_reg, lang), where))
         if prof["n_ext"]:
             mou_items.append(("%s in %s" if en else "%s pada %s") % (pct(prof["n_mou"], prof["n_ext"], lang), where))
         else:
@@ -3167,7 +3372,14 @@ def semester_section(act, cats, flags, lang, numbers):
         else:
             p_cross += " Tidak ada di antaranya yang mengonversi MK yang sama pada %s." % both
     return {"paras": [p_overview, p_mix, p_rates, p_cross],
-            "compare": semester_compare_table(act, cats, flags, lang), "cross": cross}
+            "compare": semester_compare_table(act, cats, flags, lang, unc), "cross": cross}
+
+
+UNC_FIG_NOTE = {
+    "id": " Grafik ini juga memuat aktivitas yang belum selesai (Evaluasi/Diajukan), yang tidak dihitung pada angka lain.",
+    "en": (" This chart also includes activities not yet completed (under evaluation or awaiting approval), which are "
+           "not counted elsewhere."),
+}
 
 
 def narrative_content(act, raw, flags, nim_info, meta, cats, lang):
@@ -3181,6 +3393,7 @@ def narrative_content(act, raw, flags, nim_info, meta, cats, lang):
     prodi_counts = ranked(act.groupby("Program Studi")["NIM"].nunique())
     jenis_counts = ranked(act.groupby("Jenis Aktivitas")["NIM"].nunique())
     pending_df, excluded_df = not_done_tables(act, meta.get("act_all"), meta["drop_status"], lang)
+    unc = uncounted_records(meta.get("act_all"), meta["drop_status"])
     cross = cross_semester_table(act, lang)
 
     # tata letak: nomor bagian, gambar, dan tabel mengikuti urutan kemunculan
@@ -3216,30 +3429,33 @@ def narrative_content(act, raw, flags, nim_info, meta, cats, lang):
     for i, key in enumerate(tab_keys, start=1):
         numbers[key] = i
         captions[key] = TABLE_CAPTIONS[lang][key].format(n=i)
+    if unc_len(unc):
+        captions["jenis_status"] += UNC_FIG_NOTE[lang]
 
-    summary, overall = summary_paragraphs(act, cats, flags, nim_info, meta, prodi_counts, jenis_counts, lang, sec_no)
+    summary, overall = summary_paragraphs(act, cats, flags, nim_info, meta, prodi_counts, jenis_counts, lang, sec_no,
+                                          unc)
     quality, actions = quality_section(act, cats, flags, nim_info, meta, lang, sec_no, periods)
     n_done = int(overall["status"].get("Selesai", 0))
     mou_share = "-"
     if overall["n_ext"]:
         mou_share = pct(overall["n_mou"], overall["n_ext"], lang)
     kpi = [(T["k_students"], num(n_stu, lang)), (T["k_acts"], num(n_act, lang)),
-           (T["k_prodi"], num(len(prodi_counts), lang)), (T["k_done"], pct(n_done, n_act, lang)),
+           (T["k_prodi"], num(len(prodi_counts), lang)), (T["k_done"], pct(n_done, n_act + unc_len(unc), lang)),
            (T["k_ext"], num(len(overall["partners"]), lang)), (T["k_mou"], mou_share)]
     pending_text = pending_paragraphs(act, meta, lang, pending_df, excluded_df,
                                       numbers.get("t_pending", 1), numbers.get("t_excluded", 2))
     semester = None
     if multi:
-        semester = semester_section(act, cats, flags, lang, numbers)
+        semester = semester_section(act, cats, flags, lang, numbers, unc)
     return {
         "lang": lang,
         "kpi": kpi,
         "summary": summary,
         "semester": semester,
         "prodi_intro": T["prodi_intro"].format(**numbers),
-        "prodi": prodi_story(act, cats, flags, mk_names, prodi_counts, n_stu, lang, periods),
+        "prodi": prodi_story(act, cats, flags, mk_names, prodi_counts, n_stu, lang, periods, unc),
         "jenis_intro": T["jenis_intro"].format(**numbers),
-        "jenis": jenis_story(act, cats, flags, mk_names, jenis_counts, n_stu, lang, periods),
+        "jenis": jenis_story(act, cats, flags, mk_names, jenis_counts, n_stu, lang, periods, unc),
         "pending": pending_text,
         "pending_df": pending_df,
         "excluded_df": excluded_df,
@@ -3441,7 +3657,7 @@ def count_table(rows, cols, row_order, col_order, row_label, col_label):
 
 
 @st.cache_data(show_spinner=False)
-def narrative_charts(act, cats, lang):
+def narrative_charts(act, cats, lang, unc=None):
     """Grafik laporan naratif sebagai PNG (bytes), label sesuai bahasa; + 2 grafik semester bila >1 semester."""
     T = NARR_TEXT[lang]
 
@@ -3462,11 +3678,12 @@ def narrative_charts(act, cats, lang):
     for j, n in ranked(act.groupby("Jenis Aktivitas")["NIM"].nunique()):
         jenis_order.append(j)
     jenis_stack = ordered_jenis(set(act["Jenis Aktivitas"]))
+    reg = with_uncounted(act, unc)
     status_order = []
     for s in STATUS_ORDER:
-        if s in set(act["Status Aktivitas"]):
+        if s in set(reg["Status Aktivitas"]):
             status_order.append(s)
-    for s in sorted(set(act["Status Aktivitas"])):
+    for s in sorted(set(reg["Status Aktivitas"])):
         if s not in status_order:
             status_order.append(s)
     status_colors = {}
@@ -3496,8 +3713,18 @@ def narrative_charts(act, cats, lang):
     charts["prodi_jenis"] = stacked_barh_png(t, jenis_colors(jenis_stack, lang), prodi_totals, T["x_label"])
     t = count_table(act["Program Studi"], cats, prodi_order, PARTNER_ORDER, prodi_label, cat_lbl)
     charts["prodi_mitra"] = stacked_barh_png(t, partner_colors, prodi_plain, T["x_label"])
-    t = count_table(act["Jenis Aktivitas"], act["Status Aktivitas"], jenis_order, status_order, jenis_lbl, status_lbl)
-    charts["jenis_status"] = stacked_barh_png(t, status_colors, jenis_shares, T["x_label"])
+    reg_order = list(jenis_order)
+    for j, n in ranked(reg.groupby("Jenis Aktivitas").size()):
+        if j not in reg_order:
+            reg_order.append(j)
+    reg_shares = jenis_shares
+    if len(reg) != len(act):
+        reg_shares = {}
+        for j in reg_order:
+            n = int((reg["Jenis Aktivitas"] == j).sum())
+            reg_shares[jenis_lbl(j)] = "%d (%s)" % (n, pct(n, len(reg), lang))
+    t = count_table(reg["Jenis Aktivitas"], reg["Status Aktivitas"], reg_order, status_order, jenis_lbl, status_lbl)
+    charts["jenis_status"] = stacked_barh_png(t, status_colors, reg_shares, T["x_label"])
     t = count_table(act["Jenis Aktivitas"], cats, jenis_order, PARTNER_ORDER, jenis_lbl, cat_lbl)
     charts["jenis_mitra"] = stacked_barh_png(t, partner_colors, jenis_totals, T["x_label"])
 
@@ -4309,11 +4536,19 @@ with st.sidebar:
     all_status = sorted(act_all["Status Aktivitas"].unique())
     default_drop = []
     for s in all_status:
-        if s in ["Ditolak", "Dibatalkan"] or is_dup_status(s):
+        if s != "Selesai":
             default_drop.append(s)
+    if "Selesai" not in all_status:
+        default_drop = []
+        for s in all_status:
+            if s in ["Ditolak", "Dibatalkan"] or is_dup_status(s):
+                default_drop.append(s)
     drop_status = st.multiselect("Buang status aktivitas", all_status, default=default_drop,
-                                 help="'(duplikat)' = pengajuan Diajukan/Evaluasi yang mengonversi MK yang sama dengan "
-                                      "aktivitas Selesai milik mahasiswa yang sama pada semester yang sama.")
+                                 help="Bawaan: hanya aktivitas Selesai yang dihitung. Evaluasi/Diajukan tetap "
+                                      "dilaporkan sebagai 'belum selesai' tetapi tidak dihitung; hapus dari daftar ini "
+                                      "untuk ikut menghitungnya. '(duplikat)' = pengajuan Diajukan/Evaluasi yang "
+                                      "mengonversi MK yang sama dengan aktivitas Selesai milik mahasiswa yang sama "
+                                      "pada semester yang sama.")
     mk_overload = st.number_input("Ambang MK berlebih (F2)", min_value=1, max_value=50, value=5)
     mk_overload_px = st.number_input("Ambang MK berlebih - Pertukaran Pelajar (F2)",
                                      min_value=1, max_value=60, value=12)
@@ -4344,6 +4579,7 @@ with st.sidebar:
 
 act = act_all[~act_all["Status Aktivitas"].isin(drop_status)].reset_index(drop=True)
 act["No"] = range(1, len(act) + 1)
+uncounted = uncounted_records(act_all, drop_status)
 if len(act) == 0:
     st.warning("Tidak ada aktivitas tersisa setelah filter status.")
     st.stop()
@@ -4367,7 +4603,7 @@ meta = {"source_note": source_note, "drop_status": drop_status, "n_dropped": n_d
 
 cats = partner_categories(act, flags)
 narr = narrative_content(act, raw, flags, nim_info, meta, cats, lang)
-charts = narrative_charts(act, cats, lang)
+charts = narrative_charts(act, cats, lang, uncounted)
 narr_name = "%s_%s" % (stem, NARR_TEXT[lang]["file"])
 narr_errors = []
 try:
@@ -4437,6 +4673,9 @@ if query.strip():
                 elif r["Periode Akademik"] not in periods_sel:
                     included = "Tidak (semester lain)"
                     note = "-"
+                elif r["Status Aktivitas"] in IN_PROGRESS:
+                    included = "Tidak (belum selesai)"
+                    note = "-"
                 else:
                     included = "Tidak (dibuang filter)"
                     note = "-"
@@ -4453,6 +4692,9 @@ if query.strip():
             in_sel = rec[rec["Periode Akademik"].isin(periods_sel)]
             if len(kept) == 0 and len(in_sel) == 0:
                 st.info("Mahasiswa ini tidak tercatat pada semester yang dipilih (%s)." % join(periods_sel, "id"))
+            elif len(kept) == 0 and in_sel["Status Aktivitas"].isin(IN_PROGRESS).any():
+                st.warning("Aktivitas mahasiswa ini belum berstatus Selesai, sehingga ia belum dihitung dalam jumlah "
+                           "mahasiswa. Aktivitasnya tercantum di tab Mahasiswa Status Selain Selesai.")
             elif len(kept) == 0:
                 st.warning("Semua record mahasiswa ini dibuang oleh filter status, sehingga ia tidak dihitung "
                            "dalam jumlah mahasiswa.")
@@ -4486,7 +4728,10 @@ with tabs["Ringkasan"]:
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Status Aktivitas")
-        st.pyplot(barh(act["Status Aktivitas"].value_counts(), NAVY, "Status aktivitas"))
+        st.pyplot(barh(with_uncounted(act, uncounted)["Status Aktivitas"].value_counts(), NAVY, "Status aktivitas"))
+        if unc_len(uncounted):
+            st.caption("Termasuk %d aktivitas belum selesai (Evaluasi/Diajukan) yang tidak dihitung pada angka lain."
+                       % unc_len(uncounted))
     with c2:
         st.subheader("Flag")
         fc = {}
@@ -4502,11 +4747,11 @@ with tabs["Ringkasan"]:
 if multi_sem:
     with tabs["Per Semester"]:
         st.subheader("Perbandingan semester")
-        compare = semester_compare_table(act, cats, flags, "id")
+        compare = semester_compare_table(act, cats, flags, "id", uncounted)
         st.dataframe(compare, use_container_width=True, hide_index=True, height=(len(compare) + 1) * 35 + 3)
         st.download_button("⬇️ Unduh perbandingan semester (CSV)", compare.to_csv(index=False).encode("utf-8"),
                            file_name="%s_perbandingan_semester.csv" % stem, mime="text/csv", key="dl_sem_compare")
-        charts_id = narrative_charts(act, cats, "id")
+        charts_id = narrative_charts(act, cats, "id", uncounted)
         st.image(charts_id["sem_prodi"],
                  caption="Jumlah mahasiswa per program studi pada setiap semester (NIM unik dalam semester).")
         st.image(charts_id["sem_jenis"],
@@ -4688,7 +4933,7 @@ with tabs[PENDING_TAB[lang]]:
     pending_df = narr["pending_df"]
     excluded_df = narr["excluded_df"]
     st.subheader(PENDING_TAB[lang])
-    raw_pending = act[act["Status Aktivitas"] != "Selesai"]
+    raw_pending = with_uncounted(act[act["Status Aktivitas"] != "Selesai"], uncounted)
     p1, p2, p3, p4 = st.columns(4)
     p1.metric("Activities" if en else "Aktivitas", len(raw_pending))
     p2.metric("Students" if en else "Mahasiswa", raw_pending["NIM"].nunique())
