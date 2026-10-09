@@ -2746,7 +2746,7 @@ def build_narrative_docx(content, charts, meta):
 
 # ================================================================ UI
 st.set_page_config(page_title="Analisis MBKM", page_icon="🎓", layout="wide")
-st.title("Analisis Aktivitas MBKM & Mata Kuliah Konversi")
+st.title("Analisis Aktivitas MBKM & Mata Kuliah Konversi i3L University")
 # st.caption("Unggah file ekspor SIAKAD (.xls / .xlsx). Data dinormalkan ke 1 baris per aktivitas, "
 #            "lalu diberi flag kualitas data.")
 st.caption("Supported by Claude Opus 4.8 (Anthropic PBC, San Francisco, California, U.S.) ")
@@ -2824,8 +2824,10 @@ m1.metric("Aktivitas", n_act)
 # m4.metric("Dikecualikan", n_dropped)
 # m5.metric("Isu per-record", n_issue)
 
-tab_sum, tab_jenis, tab_prodi, tab_flag, tab_nim, tab_matrix, tab_narr, tab_dl = st.tabs(
-    ["Ringkasan", "Per Jenis", "Per Program Studi", "Flag", "Cek NIM", "Matriks", "Narasi", "Unduh"])
+PENDING_TAB = {"id": "Mahasiswa Status Selain Selesai", "en": "Students with a Status Other than Completed"}
+tab_sum, tab_jenis, tab_prodi, tab_flag, tab_nim, tab_pending, tab_matrix, tab_narr, tab_dl = st.tabs(
+    ["Ringkasan", "Per Jenis", "Per Program Studi", "Flag", "Cek NIM", PENDING_TAB[lang], "Matriks", "Narasi",
+     "Unduh"])
 
 with tab_sum:
     c1, c2 = st.columns(2)
@@ -2945,6 +2947,50 @@ with tab_nim:
             st.dataframe(hits[["Jenis Aktivitas", "Status Aktivitas", "Mitra", "Jml MK", "Total SKS",
                                "MK Konversi", "Dosen Pembimbing", "Dosen Penguji"]],
                          use_container_width=True, hide_index=True)
+
+with tab_pending:
+    T = NARR_TEXT[lang]
+    en = lang == "en"
+    pending_df = narr["pending_df"]
+    excluded_df = narr["excluded_df"]
+    st.subheader(PENDING_TAB[lang])
+    raw_pending = act[act["Status Aktivitas"] != "Selesai"]
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("Activities" if en else "Aktivitas", len(raw_pending))
+    p2.metric("Students" if en else "Mahasiswa", raw_pending["NIM"].nunique())
+    p3.metric(status_name("Evaluasi", lang), int((raw_pending["Status Aktivitas"] == "Evaluasi").sum()))
+    p4.metric(status_name("Diajukan", lang), int((raw_pending["Status Aktivitas"] == "Diajukan").sum()))
+    for p in narr["pending"]:
+        st.markdown(md_escape(p))
+    st.divider()
+    if len(pending_df):
+        st.markdown("**" + T["pending_t1"] + "**")
+        prodi_col = pending_df.columns[2]
+        status_col = pending_df.columns[4]
+        f1, f2 = st.columns(2)
+        prodi_sel = f1.multiselect(prodi_col, sorted(pending_df[prodi_col].unique()), key="pend_prodi")
+        status_sel = f2.multiselect(status_col, list(pending_df[status_col].unique()), key="pend_status")
+        shown = pending_df
+        if prodi_sel:
+            shown = shown[shown[prodi_col].isin(prodi_sel)]
+        if status_sel:
+            shown = shown[shown[status_col].isin(status_sel)]
+        st.dataframe(shown, use_container_width=True, hide_index=True)
+        st.download_button("⬇️ " + ("Download list (CSV)" if en else "Unduh daftar (CSV)"),
+                           shown.to_csv(index=False).encode("utf-8"),
+                           file_name="%s_%s.csv" % (stem, "not_completed" if en else "belum_selesai"),
+                           mime="text/csv", key="dl_pending")
+    else:
+        st.success("All analysed activities have been completed." if en
+                   else "Semua aktivitas yang dianalisis telah berstatus Selesai.")
+    if len(excluded_df):
+        st.divider()
+        st.markdown("**" + T["pending_t2"] + "**")
+        st.dataframe(excluded_df, use_container_width=True, hide_index=True)
+        st.download_button("⬇️ " + ("Download excluded records (CSV)" if en else "Unduh record dikecualikan (CSV)"),
+                           excluded_df.to_csv(index=False).encode("utf-8"),
+                           file_name="%s_%s.csv" % (stem, "excluded" if en else "dikecualikan"),
+                           mime="text/csv", key="dl_excluded")
 
 with tab_matrix:
     st.subheader("Matriks mahasiswa: Program Studi × Jenis Aktivitas")
