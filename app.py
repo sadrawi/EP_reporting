@@ -488,7 +488,53 @@ def export_table(act, flags, cols):
     return table
 
 
-def build_excel(act, flags, nim_info):
+NOT_DONE_ORDER = ["Evaluasi", "Diajukan", "Ditolak", "Dibatalkan"]
+NOT_DONE_COLS = {
+    "id": ["NIM", "Nama", "Program Studi", "Jenis", "Status", "Mitra", "Aktivitas lain yang masih tercatat"],
+    "en": ["NIM", "Name", "Study program", "Type", "Status", "Partner", "Other active activity"],
+}
+
+
+def status_rank(status):
+    if status in NOT_DONE_ORDER:
+        return NOT_DONE_ORDER.index(status)
+    return len(NOT_DONE_ORDER)
+
+
+def not_done_tables(act, act_all, drop_status, lang="id"):
+    """(1) aktivitas dianalisis yang belum Selesai, (2) record yang dibuang filter (mis. Ditolak/Dibatalkan).
+
+    Tabel (2) diberi kolom aktivitas lain milik NIM yang sama yang masih tercatat setelah filter.
+    """
+    cols = NOT_DONE_COLS[lang]
+    pending_rows = []
+    for _, r in act[act["Status Aktivitas"] != "Selesai"].iterrows():
+        pending_rows.append([status_rank(r["Status Aktivitas"]), r["Program Studi"], r["Nama"],
+                             r["NIM"], r["Nama"], prodi_label(r["Program Studi"]), jenis_short(r["Jenis Aktivitas"], lang),
+                             status_name(r["Status Aktivitas"], lang), r["Mitra"]])
+    pending_rows.sort(key=lambda x: (x[0], x[1], x[2]))
+    pending = []
+    for row in pending_rows:
+        pending.append(row[3:])
+    excluded_rows = []
+    if act_all is not None and drop_status:
+        for _, r in act_all[act_all["Status Aktivitas"].isin(drop_status)].iterrows():
+            others = []
+            for _, o in act[act["NIM"] == r["NIM"]].iterrows():
+                others.append("%s - %s" % (jenis_short(o["Jenis Aktivitas"], lang),
+                                           status_name(o["Status Aktivitas"], lang)))
+            excluded_rows.append([status_rank(r["Status Aktivitas"]), r["Program Studi"], r["Nama"],
+                                  r["NIM"], r["Nama"], prodi_label(r["Program Studi"]),
+                                  jenis_short(r["Jenis Aktivitas"], lang), status_name(r["Status Aktivitas"], lang),
+                                  r["Mitra"], "; ".join(others) if others else "-"])
+    excluded_rows.sort(key=lambda x: (x[0], x[1], x[2]))
+    excluded = []
+    for row in excluded_rows:
+        excluded.append(row[3:])
+    return pd.DataFrame(pending, columns=cols[:6]), pd.DataFrame(excluded, columns=cols)
+
+
+def build_excel(act, flags, nim_info, act_all=None, drop_status=None):
     buf = io.BytesIO()
     cols = ["No", "NIM", "Nama", "Program Studi", "Jenis Aktivitas", "Mitra",
             "Status Mitra", "Status Aktivitas", "Tanggal Mulai", "Tanggal Selesai",
@@ -500,6 +546,10 @@ def build_excel(act, flags, nim_info):
         rekap_table(act, "Jenis Aktivitas").to_excel(xl, sheet_name="Per Jenis", index=False)
         rekap_table(act, "Program Studi").to_excel(xl, sheet_name="Per Prodi", index=False)
         nim_info["multi"].to_excel(xl, sheet_name="Cek NIM", index=False)
+        pending, excluded = not_done_tables(act, act_all, drop_status, "id")
+        pending.to_excel(xl, sheet_name="Belum Selesai", index=False)
+        if len(excluded):
+            excluded.to_excel(xl, sheet_name="Dikecualikan", index=False)
     buf.seek(0)
     return buf.getvalue()
 
@@ -507,6 +557,34 @@ def build_excel(act, flags, nim_info):
 def build_csv(act, flags):
     cols = ["No"] + KEYS + ["Jml MK", "Total SKS", "MK Konversi"]
     return export_table(act, flags, cols).to_csv(index=False).encode("utf-8")
+
+
+def not_done_pdf_table(df, widths_mm, cell_style, header_font, table_style):
+    """Tabel ReportLab untuk daftar mahasiswa belum Selesai / dikecualikan (sel dibungkus otomatis)."""
+    from reportlab.lib import colors
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import Paragraph, Table
+
+    def esc(t):
+        return str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    small = ParagraphStyle("NDCELL", parent=cell_style, fontSize=7.6, leading=9.6)
+    head = ParagraphStyle("NDHEAD", parent=small, fontName=header_font, textColor=colors.white)
+    rows = [[]]
+    for c in df.columns:
+        rows[0].append(Paragraph(esc(c), head))
+    for _, r in df.iterrows():
+        row = []
+        for c in df.columns:
+            row.append(Paragraph(esc(r[c]), small))
+        rows.append(row)
+    widths = []
+    for w in widths_mm:
+        widths.append(w * mm)
+    table = Table(rows, colWidths=widths, repeatRows=1)
+    table.setStyle(table_style)
+    return table
 
 
 def build_pdf(act, raw, flags, nim_info, meta):
@@ -669,6 +747,28 @@ def build_pdf(act, raw, flags, nim_info, meta):
                                "SIAKAD telah digabung." % meta["n_split"], SMALL))
     section("6. Pemeriksaan NIM", items)
 
+    # 7. Mahasiswa dengan status selain Selesai
+    pending, excluded = not_done_tables(act, meta.get("act_all"), meta["drop_status"], "id")
+    items = []
+    if len(pending) == 0:
+        items.append(Paragraph("Semua aktivitas yang dianalisis telah berstatus Selesai.", CELL))
+    else:
+        counts = pending["Status"].value_counts()
+        parts = []
+        for s in sorted(counts.index, key=status_rank):
+            parts.append("%d %s" % (counts[s], s))
+        items.append(Paragraph("%d aktivitas (%d mahasiswa) belum berstatus Selesai: %s."
+                               % (len(pending), pending["NIM"].nunique(), ", ".join(parts)), CELL))
+        items.append(Spacer(1, 4))
+        items.append(not_done_pdf_table(pending, [18, 40, 36, 24, 18, 39], CELL, "Helvetica-Bold", tstyle()))
+    if len(excluded):
+        items.append(Spacer(1, 6))
+        items.append(Paragraph("Record yang dikecualikan oleh filter (%s): %d record."
+                               % (", ".join(meta["drop_status"]), len(excluded)), CELL))
+        items.append(Spacer(1, 4))
+        items.append(not_done_pdf_table(excluded, [17, 33, 29, 20, 18, 31, 27], CELL, "Helvetica-Bold", tstyle(header_bg=red)))
+    section("7. Mahasiswa dengan Status Selain Selesai", items)
+
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm,
                             topMargin=16 * mm, bottomMargin=15 * mm, title="Laporan Analisis MBKM")
@@ -700,8 +800,11 @@ NARR_TEXT = {
         "s1": "1. Ringkasan Eksekutif",
         "s2": "2. Analisis per Program Studi",
         "s3": "3. Analisis per Jenis Aktivitas",
-        "s4": "4. Kualitas Data dan Tindak Lanjut",
-        "s5": "5. Catatan Metodologi",
+        "s_pending": "4. Mahasiswa dengan Status Selain Selesai",
+        "pending_t1": "Tabel 1. Aktivitas yang belum berstatus Selesai.",
+        "pending_t2": "Tabel 2. Record yang dikecualikan dari analisis, beserta aktivitas lain mahasiswa yang masih tercatat.",
+        "s4": "5. Kualitas Data dan Tindak Lanjut",
+        "s5": "6. Catatan Metodologi",
         "appendix": "Lampiran. Matriks Mahasiswa per Program Studi dan Jenis Aktivitas",
         "appendix_note": "Angka = jumlah mahasiswa (NIM unik); kolom dan baris Total juga dihitung sebagai NIM unik.",
         "actions": "Tindak lanjut yang disarankan:",
@@ -729,8 +832,11 @@ NARR_TEXT = {
         "s1": "1. Executive Summary",
         "s2": "2. Analysis by Study Program",
         "s3": "3. Analysis by Activity Type",
-        "s4": "4. Data Quality and Follow-up",
-        "s5": "5. Methodological Notes",
+        "s_pending": "4. Students with a Status Other than Completed",
+        "pending_t1": "Table 1. Activities not yet completed.",
+        "pending_t2": "Table 2. Records excluded from the analysis, with the student's other activity still on record.",
+        "s4": "5. Data Quality and Follow-up",
+        "s5": "6. Methodological Notes",
         "appendix": "Appendix. Student Matrix by Study Program and Activity Type",
         "appendix_note": "Values = number of students (unique NIM); the Total row and column also count unique NIMs.",
         "actions": "Recommended follow-up:",
@@ -1497,7 +1603,7 @@ def summary_paragraphs(act, cats, flags, nim_info, meta, prodi_counts, jenis_cou
             p1 += " Each student is recorded in exactly one activity."
         else:
             p1 += (" The number of activities exceeds the number of students because %s %s recorded in more than "
-                   "one activity (see Section 4)." % (studs(k_multi, lang), plural(k_multi, "is", "are")))
+                   "one activity (see Section 5)." % (studs(k_multi, lang), plural(k_multi, "is", "are")))
     else:
         p1 = ("Pada Periode Akademik %s, sebanyak %d mahasiswa dari %d program studi tercatat mengikuti %d "
               "aktivitas MBKM yang dikonversi ke mata kuliah." % (meta["periode"], n_stu, n_prodi, n_act))
@@ -1508,7 +1614,7 @@ def summary_paragraphs(act, cats, flags, nim_info, meta, prodi_counts, jenis_cou
             p1 += " Setiap mahasiswa tercatat pada tepat satu aktivitas."
         else:
             p1 += (" Jumlah aktivitas lebih besar daripada jumlah mahasiswa karena %d mahasiswa tercatat pada lebih "
-                   "dari satu aktivitas (lihat Bagian 4)." % k_multi)
+                   "dari satu aktivitas (lihat Bagian 5)." % k_multi)
     p2 = jenis_mix_sentence(jenis_counts, n_stu, lang) + " " + participation_sentence(prodi_counts, n_stu, lang)
     prof = group_profile(act, cats, flags)
     n_partners = len(prof["partners"])
@@ -1783,6 +1889,64 @@ def method_paragraph(meta, lang):
             % (source, drop, meta["mk_overload"], meta["mk_overload_px"]))
 
 
+def pending_paragraphs(act, meta, lang):
+    """Narasi + tabel mahasiswa yang aktivitasnya belum Selesai dan record yang dikecualikan filter."""
+    en = lang == "en"
+    pending, excluded = not_done_tables(act, meta.get("act_all"), meta["drop_status"], lang)
+    paras = []
+    if len(pending) == 0:
+        paras.append("All analysed activities have been completed." if en
+                     else "Semua aktivitas yang dianalisis telah berstatus Selesai.")
+    else:
+        raw_pending = act[act["Status Aktivitas"] != "Selesai"]
+        n_rec = len(raw_pending)
+        n_stu = raw_pending["NIM"].nunique()
+        parts = []
+        for s, n in sorted(raw_pending["Status Aktivitas"].value_counts().items(), key=lambda x: status_rank(x[0])):
+            if en:
+                parts.append("%d %s %s" % (n, plural(n, "is", "are"), status_state(s)))
+            else:
+                parts.append("%d berstatus %s" % (n, s))
+        by_prodi = []
+        for p, n in ranked(raw_pending.groupby("Program Studi").size()):
+            by_prodi.append("%s (%d)" % (prodi_label(p), n))
+        if en:
+            who = acts(n_rec, lang) if n_rec == n_stu else "%s belonging to %s" % (acts(n_rec, lang), studs(n_stu, lang))
+            text = ("A total of %s %s not yet been completed: %s. They are listed in Table 1 so that study programs "
+                    "and supervisors can follow up. By study program: %s."
+                    % (who, plural(n_rec, "has", "have"), join(parts, lang), join(by_prodi, lang)))
+        else:
+            if n_rec == n_stu:
+                who = "%d aktivitas mahasiswa" % n_rec
+            else:
+                who = "%d aktivitas milik %d mahasiswa" % (n_rec, n_stu)
+            text = ("Sebanyak %s belum berstatus Selesai: %s. Daftarnya tercantum pada Tabel 1 agar dapat "
+                    "ditindaklanjuti oleh program studi dan dosen pembimbing. Menurut program studi: %s."
+                    % (who, join(parts, lang), join(by_prodi, lang)))
+        paras.append(text)
+    if len(excluded):
+        other_col = excluded.columns[-1]
+        with_other = int((excluded[other_col] != "-").sum())
+        no_other = excluded[excluded[other_col] == "-"]["NIM"].nunique()
+        statuses = []
+        for s in meta["drop_status"]:
+            statuses.append(status_name(s, lang))
+        if en:
+            text = ("In addition, %d %s with status %s %s excluded from the analysis (Table 2). Of these, %d %s "
+                    "to students who still have another activity on record, while %s %s no other MBKM activity "
+                    "in this period."
+                    % (len(excluded), plural(len(excluded), "record", "records"), join_or(statuses),
+                       was(len(excluded)), with_other, plural(with_other, "belongs", "belong"),
+                       studs(no_other, lang), plural(no_other, "has", "have")))
+        else:
+            text = ("Selain itu, %d record berstatus %s dikecualikan dari analisis (Tabel 2). Sebanyak %d di "
+                    "antaranya milik mahasiswa yang masih memiliki aktivitas lain yang tercatat, sedangkan %d "
+                    "mahasiswa tidak memiliki aktivitas MBKM lain pada periode ini."
+                    % (len(excluded), join(meta["drop_status"], lang), with_other, no_other))
+        paras.append(text)
+    return paras, pending, excluded
+
+
 def narrative_content(act, raw, flags, nim_info, meta, cats, lang):
     """Seluruh teks laporan naratif dalam satu bahasa (dipakai oleh PDF, Word, dan tab Narasi)."""
     T = NARR_TEXT[lang]
@@ -1800,7 +1964,11 @@ def narrative_content(act, raw, flags, nim_info, meta, cats, lang):
     kpi = [(T["k_students"], num(n_stu, lang)), (T["k_acts"], num(n_act, lang)),
            (T["k_prodi"], num(len(prodi_counts), lang)), (T["k_done"], pct(n_done, n_act, lang)),
            (T["k_ext"], num(len(overall["partners"]), lang)), (T["k_mou"], mou_share)]
+    pending_text, pending_df, excluded_df = pending_paragraphs(act, meta, lang)
     return {
+        "pending": pending_text,
+        "pending_df": pending_df,
+        "excluded_df": excluded_df,
         "lang": lang,
         "kpi": kpi,
         "summary": summary,
@@ -2120,6 +2288,27 @@ def build_narrative_pdf(content, charts, meta):
             block.append(Paragraph(esc(p), BODY))
         story.append(KeepTogether(block))
 
+    block = [Paragraph(esc(T["s_pending"]), H2)]
+    for p in content["pending"]:
+        block.append(Paragraph(esc(p), BODY))
+    story.append(KeepTogether(block))
+    list_style = TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#BFBFBF")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, light]),
+    ])
+    for key, caption, widths, bg in (("pending_df", "pending_t1", [18, 40, 36, 24, 18, 38], navy),
+                                     ("excluded_df", "pending_t2", [17, 33, 29, 20, 18, 31, 26],
+                                      colors.HexColor(RED))):
+        if len(content[key]):
+            table = not_done_pdf_table(content[key], widths, CELL, font_b, list_style)
+            table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), bg)]))
+            story.append(Paragraph(esc(T[caption]), CAP))
+            story.append(table)
+            story.append(Spacer(1, 8))
+
     story.append(Paragraph(esc(T["s4"]), H2))
     for p in content["quality"]:
         story.append(Paragraph(esc(p), BODY))
@@ -2275,6 +2464,40 @@ def docx_page_field(paragraph):
             run._r.append(fld)
 
 
+def docx_list_table(doc, df, widths_cm, header_fill):
+    """Tabel Word untuk daftar mahasiswa (header berwarna, baris berselang, lebar kolom tetap)."""
+    from docx.shared import Pt, Cm, RGBColor
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+    table = doc.add_table(rows=len(df.index) + 1, cols=len(df.columns))
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    widths = []
+    for w in widths_cm:
+        widths.append(Cm(w))
+    grid = (4, "BFBFBF")
+    docx_table_layout(table, widths, {"top": grid, "left": grid, "bottom": grid, "right": grid,
+                                      "insideH": grid, "insideV": grid})
+    for i, c in enumerate(df.columns):
+        cell = table.cell(0, i)
+        docx_shade(cell, header_fill)
+        par = cell.paragraphs[0]
+        par.paragraph_format.space_after = Pt(0)
+        run = par.add_run(str(c))
+        run.bold = True
+        run.font.size = Pt(8)
+        run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+    for r, (_, values) in enumerate(df.iterrows(), start=1):
+        fill = "EEF1F7" if r % 2 == 0 else "FFFFFF"
+        for i, c in enumerate(df.columns):
+            cell = table.cell(r, i)
+            docx_shade(cell, fill)
+            par = cell.paragraphs[0]
+            par.paragraph_format.space_after = Pt(0)
+            par.paragraph_format.line_spacing = 1.0
+            run = par.add_run(str(values[c]))
+            run.font.size = Pt(8)
+    return table
+
+
 def build_narrative_docx(content, charts, meta):
     from docx import Document
     from docx.shared import Pt, Cm, Emu, RGBColor
@@ -2424,6 +2647,19 @@ def build_narrative_docx(content, charts, meta):
         for p in paras:
             body(p)
 
+    doc.add_heading(T["s_pending"], level=1)
+    for p in content["pending"]:
+        body(p)
+    for key, caption, widths, fill in (("pending_df", "pending_t1", [2.0, 4.0, 3.6, 2.4, 2.4, 3.0], NAVY),
+                                       ("excluded_df", "pending_t2", [1.8, 3.2, 2.9, 2.0, 1.9, 2.6, 3.0], RED)):
+        if len(content[key]):
+            cap = small_line(T[caption], size=8.5, after=4)
+            cap.paragraph_format.keep_with_next = True
+            for run in cap.runs:
+                run.italic = True
+            docx_list_table(doc, content[key], widths, fill.lstrip("#"))
+            doc.add_paragraph().paragraph_format.space_after = Pt(2)
+
     doc.add_heading(T["s4"], level=1)
     for p in content["quality"]:
         body(p)
@@ -2562,7 +2798,7 @@ n_dropped = len(act_all) - len(act)
 n_issue = int(pd.concat([flags[k] for k in RECORD_FLAGS], axis=1).any(axis=1).sum())
 meta = {"source_note": source_note, "drop_status": drop_status, "n_dropped": n_dropped,
         "mk_overload": mk_overload, "mk_overload_px": mk_overload_px, "n_split": n_split,
-        "periode": periode}
+        "periode": periode, "act_all": act_all}
 
 cats = partner_categories(act, flags)
 narr = narrative_content(act, raw, flags, nim_info, meta, cats, lang)
@@ -2752,6 +2988,15 @@ with tab_narr:
         st.markdown("**3.%d %s**" % (i, md_escape(name)))
         for p in paras:
             st.markdown(md_escape(p))
+    st.markdown("#### " + T["s_pending"])
+    for p in narr["pending"]:
+        st.markdown(md_escape(p))
+    if len(narr["pending_df"]):
+        st.caption(T["pending_t1"])
+        st.dataframe(narr["pending_df"], use_container_width=True, hide_index=True)
+    if len(narr["excluded_df"]):
+        st.caption(T["pending_t2"])
+        st.dataframe(narr["excluded_df"], use_container_width=True, hide_index=True)
     st.markdown("#### " + T["s4"])
     for p in narr["quality"]:
         st.markdown(md_escape(p))
@@ -2779,7 +3024,7 @@ with tab_dl:
                            file_name=narr_name + ".docx", mime=DOCX_MIME, key="dl_narr_docx")
     for err in narr_errors:
         st.warning("Laporan naratif gagal dibuat - %s" % err)
-    xlsx_bytes = build_excel(act, flags, nim_info)
+    xlsx_bytes = build_excel(act, flags, nim_info, act_all, drop_status)
     st.download_button("📊 Unduh data Excel (Aktivitas + rekap + cek NIM)", xlsx_bytes,
                        file_name=stem + "_bersih.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
