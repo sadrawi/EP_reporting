@@ -2746,7 +2746,7 @@ def build_narrative_docx(content, charts, meta):
 
 # ================================================================ UI
 st.set_page_config(page_title="Analisis MBKM", page_icon="🎓", layout="wide")
-st.title("Analisis Aktivitas MBKM & Mata Kuliah Konversi i3L University")
+st.title("Analisis Aktivitas MBKM & Mata Kuliah Konversi")
 # st.caption("Unggah file ekspor SIAKAD (.xls / .xlsx). Data dinormalkan ke 1 baris per aktivitas, "
 #            "lalu diberi flag kualitas data.")
 st.caption("Supported by Claude Opus 4.8 (Anthropic PBC, San Francisco, California, U.S.) ")
@@ -2824,10 +2824,10 @@ m1.metric("Aktivitas", n_act)
 # m4.metric("Dikecualikan", n_dropped)
 # m5.metric("Isu per-record", n_issue)
 
-PENDING_TAB = {"id": "Tidak Selesai", "en": "Non-Completed"}
-tab_sum, tab_jenis, tab_prodi, tab_flag, tab_nim, tab_pending, tab_matrix, tab_narr, tab_dl = st.tabs(
-    ["Ringkasan", "Per Jenis", "Per Program Studi", "Flag", "Cek NIM", PENDING_TAB[lang], "Matriks", "Narasi",
-     "Unduh"])
+PENDING_TAB = {"id": "Mahasiswa Status Selain Selesai", "en": "Students with a Status Other than Completed"}
+tab_sum, tab_search, tab_jenis, tab_prodi, tab_flag, tab_nim, tab_pending, tab_matrix, tab_narr, tab_dl = st.tabs(
+    ["Ringkasan", "🔍 Cari Mahasiswa", "Per Jenis", "Per Program Studi", "Flag", "Cek NIM", PENDING_TAB[lang],
+     "Matriks", "Narasi", "Unduh"])
 
 with tab_sum:
     c1, c2 = st.columns(2)
@@ -2840,6 +2840,70 @@ with tab_sum:
         for k in FLAG_COLS:
             fc[k] = int(flags[k].sum())
         st.pyplot(barh(pd.Series(fc), RED, "Jumlah aktivitas ter-flag"))
+
+with tab_search:
+    st.subheader("Cari mahasiswa")
+    query = st.text_input("Nama atau NIM (boleh sebagian, tidak membedakan huruf besar/kecil)",
+                          placeholder="contoh: ellen, sutjiawan, atau 22010173", key="search_q")
+    if not query.strip():
+        st.caption("Pencarian mencakup semua record di file, termasuk yang dibuang oleh filter status.")
+    else:
+        q = query.strip().lower()
+        by_name = act_all["Nama"].str.lower().str.contains(q, regex=False)
+        by_nim = act_all["NIM"].str.contains(re.sub(r"\s+", "", q), regex=False)
+        hits = act_all[by_name | by_nim]
+        if len(hits) == 0:
+            st.info("Tidak ada mahasiswa dengan nama atau NIM yang mengandung \"%s\"." % query.strip())
+        else:
+            people = hits.drop_duplicates("NIM")
+            options = []
+            for _, r in people.iterrows():
+                options.append("%s - %s (%s)" % (r["NIM"], r["Nama"], prodi_label(r["Program Studi"])))
+            st.caption("%d mahasiswa ditemukan." % len(options))
+            pick = options[0]
+            if len(options) > 1:
+                pick = st.selectbox("Pilih mahasiswa", options, key="search_pick")
+            nim_pick = pick.split(" - ")[0]
+            rec = act_all[act_all["NIM"] == nim_pick]
+            kept = act[act["NIM"] == nim_pick]
+            first = rec.iloc[0]
+            st.markdown("### %s" % md_escape(first["Nama"]))
+            st.caption("NIM %s · %s · Periode %s" % (nim_pick, prodi_label(first["Program Studi"]),
+                                                    first["Periode Akademik"]))
+            s1, s2, s3 = st.columns(3)
+            s1.metric("Aktivitas di file", len(rec))
+            s2.metric("Masuk analisis", len(kept))
+            s3.metric("Total SKS (dianalisis)", num(kept["Total SKS"].sum(), "id"))
+            notes = {}
+            for i in kept.index:
+                found = []
+                for k in FLAG_COLS:
+                    if flags.at[i, k]:
+                        found.append(k)
+                notes[(kept.at[i, "Jenis Aktivitas"], kept.at[i, "Status Aktivitas"], kept.at[i, "Mitra"])] = found
+            rows = []
+            for _, r in rec.iterrows():
+                key = (r["Jenis Aktivitas"], r["Status Aktivitas"], r["Mitra"])
+                if key in notes:
+                    included = "Ya"
+                    note = ", ".join(notes[key]) if notes[key] else "-"
+                else:
+                    included = "Tidak (dibuang filter)"
+                    note = "-"
+                rows.append({
+                    "Jenis Aktivitas": short_jenis(r["Jenis Aktivitas"]), "Status": r["Status Aktivitas"],
+                    "Masuk analisis": included, "Mitra": r["Mitra"], "Status Mitra": r["Status Mitra"],
+                    "Tanggal": "%s – %s" % (r["Tanggal Mulai"], r["Tanggal Selesai"]),
+                    "Jml MK": r["Jml MK"], "Total SKS": r["Total SKS"], "MK Konversi": r["MK Konversi"],
+                    "Dosen Pembimbing": r["Dosen Pembimbing"], "Dosen Penguji": r["Dosen Penguji"],
+                    "Judul Aktivitas": r["Judul Aktivitas"], "Catatan (flag)": note,
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            if len(kept) == 0:
+                st.warning("Semua record mahasiswa ini dibuang oleh filter status, sehingga ia tidak dihitung "
+                           "dalam jumlah mahasiswa.")
+            elif len(kept) > 1:
+                st.warning("Mahasiswa ini tercatat pada lebih dari satu aktivitas (F7) - periksa kemungkinan duplikasi.")
 
 with tab_jenis:
     st.subheader("Rekap mahasiswa per Jenis Aktivitas")
