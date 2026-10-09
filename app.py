@@ -95,6 +95,112 @@ F8 = "F8 MK Ganda Lintas Semester"
 CROSS_COLS = {"id": ["NIM", "Nama", "Program Studi"], "en": ["NIM", "Name", "Study program"]}
 SAME_MK_COL = {"id": "MK sama", "en": "Same course"}
 PT_PER_CM = 28.3465
+DUP_SUFFIX = " (duplikat)"
+DUP_BASE = ["Diajukan", "Evaluasi"]
+
+
+def mark_superseded(act):
+    """Pengajuan ganda: record Diajukan/Evaluasi yang mengonversi MK yang sama dengan aktivitas Selesai milik NIM
+    yang sama pada semester yang sama diberi status '<status> (duplikat)', sehingga dapat dibuang seperti Ditolak."""
+    out = act.reset_index(drop=True).copy()
+    statuses = list(out["Status Aktivitas"])
+    for i in range(len(out)):
+        if statuses[i] not in DUP_BASE:
+            continue
+        codes = set(str(out.at[i, "_codes"]).split(";")) - {""}
+        if not codes:
+            continue
+        for j in range(len(out)):
+            if j == i or statuses[j] != "Selesai":
+                continue
+            if out.at[j, "NIM"] != out.at[i, "NIM"] or out.at[j, "Periode Akademik"] != out.at[i, "Periode Akademik"]:
+                continue
+            if codes & set(str(out.at[j, "_codes"]).split(";")):
+                out.at[i, "Status Aktivitas"] = statuses[i] + DUP_SUFFIX
+                break
+    return out
+
+
+def is_dup_status(name):
+    return str(name).endswith(DUP_SUFFIX)
+
+
+DEFAULT_COHORTS = ["22", "23"]
+
+
+def parse_cohorts(text):
+    """'22, 23' -> ['22', '23'] (awal NIM yang dihitung)."""
+    out = []
+    for piece in re.split(r"[,;\s]+", str(text)):
+        piece = re.sub(r"\D", "", piece)
+        if piece and piece not in out:
+            out.append(piece)
+    return out
+
+
+def cohort_counts(act, prefixes):
+    """Jumlah mahasiswa (NIM unik) per awal NIM; NIM lain dikumpulkan per dua digit awal."""
+    counts = {}
+    for p in prefixes:
+        counts[p] = 0
+    others = {}
+    for nim in act["NIM"].astype(str).unique():
+        matched = False
+        for p in prefixes:
+            if nim.startswith(p):
+                counts[p] += 1
+                matched = True
+                break
+        if not matched:
+            key = nim[:2] if nim[:2].isdigit() else "?"
+            others[key] = others.get(key, 0) + 1
+    return counts, others
+
+
+def cohort_table(act, prefixes, periods):
+    """Tabel mahasiswa per awal NIM: kolom per semester (bila >1) + Total."""
+    groups = []
+    if len(periods) > 1:
+        for p in periods:
+            groups.append((p, act[act["Periode Akademik"] == p]))
+        groups.append(("Total", act))
+    else:
+        groups.append(("Mahasiswa", act))
+    tallies = []
+    other_keys = []
+    for label, sub in groups:
+        counts, others = cohort_counts(sub, prefixes)
+        tallies.append((counts, others))
+        for k in others:
+            if k not in other_keys:
+                other_keys.append(k)
+    other_keys.sort()
+    rows = []
+    for p in prefixes:
+        row = ["NIM %s..." % p]
+        for counts, others in tallies:
+            row.append(counts[p])
+        rows.append(row)
+    if other_keys:
+        row = ["Lainnya (%s)" % ", ".join(other_keys)]
+        for counts, others in tallies:
+            row.append(sum(others.values()))
+        rows.append(row)
+    row = ["Total"]
+    for label, sub in groups:
+        row.append(int(sub["NIM"].nunique()))
+    rows.append(row)
+    cols = ["Awal NIM"]
+    for label, sub in groups:
+        cols.append(label)
+    return pd.DataFrame(rows, columns=cols)
+
+
+def any_dup(statuses):
+    for s in statuses:
+        if is_dup_status(s):
+            return True
+    return False
 
 
 def short_jenis(name):
@@ -910,7 +1016,7 @@ def build_pdf(act, raw, flags, nim_info, meta):
         rows = [["Metrik"] + periods + ["Total"]]
         for label, values, total in (
                 ("Jumlah aktivitas (setelah filter)", per["act"], str(n_act)),
-                ("Jumlah mahasiswa (NIM unik)", per["stu"], str(n_stu)),
+                ("Jumlah mahasiswa (NIM unik)", per["stu"], str(n_stu))) + cohort_pdf_rows(act, meta, periods) + (
                 ("NIM dengan >1 aktivitas dalam semester yang sama", per["dup"], str(len(multi))),
                 ("Mahasiswa di lebih dari satu semester", dashes, str(len(cross))),
                 ("Baris pada file ekspor asli", per["raw"], str(len(raw))),
@@ -1030,8 +1136,10 @@ def build_pdf(act, raw, flags, nim_info, meta):
         # 1. Ringkasan
         rows = [["Metrik", "Nilai"],
                 ["Jumlah aktivitas (setelah filter)", str(n_act)],
-                ["Jumlah mahasiswa (NIM unik)", str(n_stu)],
-                ["NIM dengan >1 aktivitas", multi_text],
+                ["Jumlah mahasiswa (NIM unik)", str(n_stu)]]
+        for label, values, total in cohort_pdf_rows(act, meta, periods):
+            rows.append([label, total])
+        rows += [["NIM dengan >1 aktivitas", multi_text],
                 ["Baris pada file ekspor asli", str(len(raw))],
                 ["Record dikecualikan (%s)" % (", ".join(meta["drop_status"]) or "-"), str(meta["n_dropped"])],
                 ["Aktivitas dengan isu data per-record", str(n_issue)]]
@@ -1242,6 +1350,21 @@ def fit_widths_mm(df, total_mm, size, pad_pt, font="Helvetica", font_b="Helvetic
     for w in fit_widths(df, total_mm * 72 / 25.4, size, pad_pt, font, font_b):
         widths.append(w * 25.4 / 72)
     return widths
+
+
+def cohort_pdf_rows(act, meta, periods):
+    """Baris 'Mahasiswa NIM 22...' untuk tabel ringkasan PDF: (label, nilai per semester, total)."""
+    out = []
+    prefixes = meta.get("cohorts", DEFAULT_COHORTS)
+    totals, others = cohort_counts(act, prefixes)
+    for p in prefixes:
+        values = []
+        if len(periods) > 1:
+            for per in periods:
+                counts, o = cohort_counts(act[act["Periode Akademik"] == per], [p])
+                values.append(str(counts[p]))
+        out.append(("Mahasiswa dengan NIM berawalan %s" % p, values, str(totals[p])))
+    return tuple(out)
 
 
 # ---------------------------------------------------------------- laporan naratif: bahasa
@@ -1471,12 +1594,20 @@ def jenis_short(name, lang):
 
 
 def status_name(name, lang):
+    if is_dup_status(name):
+        base = str(name)[:-len(DUP_SUFFIX)]
+        if lang == "en":
+            return STATUS_EN.get(base, base) + " (duplicate)"
+        return name
     if lang == "en":
         return STATUS_EN.get(name, name)
     return name
 
 
 def status_state(name):
+    if is_dup_status(name):
+        base = str(name)[:-len(DUP_SUFFIX)]
+        return STATUS_EN_STATE.get(base, base) + " (duplicate)"
     return STATUS_EN_STATE.get(name, "with status " + name)
 
 
@@ -2163,6 +2294,48 @@ def dropped_sentence(meta, lang):
             % (meta["n_dropped"], join(meta["drop_status"], lang)))
 
 
+def cohort_sentence(act, meta, lang):
+    """Kalimat jumlah mahasiswa per awal NIM (mis. NIM 22 dan 23)."""
+    prefixes = meta.get("cohorts", DEFAULT_COHORTS)
+    if not prefixes:
+        return ""
+    counts, others = cohort_counts(act, prefixes)
+    en = lang == "en"
+    parts = []
+    for p in prefixes:
+        n = counts[p]
+        if en:
+            if n == 0:
+                parts.append("none have a NIM starting with %s" % p)
+            else:
+                parts.append("%s %s a NIM starting with %s" % (studs(n, lang), plural(n, "has", "have"), p))
+        else:
+            if n == 0:
+                parts.append("tidak ada mahasiswa dengan NIM berawalan %s" % p)
+            else:
+                parts.append("%d mahasiswa memiliki NIM berawalan %s" % (n, p))
+    if en:
+        text = " By NIM, " + join(parts, lang)
+    else:
+        text = " Berdasarkan awal NIM, " + join(parts, lang)
+    n_other = sum(others.values())
+    if n_other:
+        keys = sorted(others.keys())
+        if en:
+            text += "; the other %d %s a NIM starting with %s" % (n_other, plural(n_other, "has", "have"),
+                                                                join_or(keys))
+        else:
+            text += "; %d mahasiswa lainnya memiliki NIM berawalan %s" % (n_other, join_or_id(keys))
+    return text + "."
+
+
+def join_or_id(items):
+    items = list(items)
+    if len(items) <= 1:
+        return "".join(items)
+    return ", ".join(items[:-1]) + " atau " + items[-1]
+
+
 def summary_opening_multi(act, nim_info, meta, periods, n_prodi, lang, sec_no):
     """Paragraf pembuka ringkasan untuk laporan lebih dari satu semester (mis. satu tahun akademik)."""
     en = lang == "en"
@@ -2246,6 +2419,7 @@ def summary_paragraphs(act, cats, flags, nim_info, meta, prodi_counts, jenis_cou
         else:
             p1 += (" Jumlah aktivitas lebih besar daripada jumlah mahasiswa karena %d mahasiswa tercatat pada lebih "
                    "dari satu aktivitas (lihat Bagian %d)." % (k_multi, sec_no["s4"]))
+    p1 += cohort_sentence(act, meta, lang)
     p2 = jenis_mix_sentence(jenis_counts, n_stu, lang) + " " + participation_sentence(prodi_counts, n_stu, lang)
     prof = group_profile(act, cats, flags)
     n_partners = len(prof["partners"])
@@ -2606,6 +2780,9 @@ def method_paragraph(meta, lang, periods=None):
                     % (join_or(statuses), ", ".join(meta["drop_status"])))
         else:
             drop = "No activity status is excluded."
+        if any_dup(meta["drop_status"]):
+            drop += (" \"Duplicate\" marks a submission (Diajukan/Evaluasi) that converts the same course as a completed "
+                     "activity of the same student in the same semester.")
         extra = ""
         if multi:
             extra = (" Data for %s are combined in one report; students are counted as unique NIMs across all "
@@ -2628,6 +2805,9 @@ def method_paragraph(meta, lang, periods=None):
         drop = "Record berstatus %s dikecualikan dari analisis." % join(meta["drop_status"], lang)
     else:
         drop = "Tidak ada status aktivitas yang dikecualikan."
+    if any_dup(meta["drop_status"]):
+        drop += (" Status \"duplikat\" diberikan pada pengajuan (Diajukan/Evaluasi) yang mengonversi MK yang sama "
+                 "dengan aktivitas Selesai milik mahasiswa yang sama pada semester yang sama.")
     extra = ""
     if multi:
         extra = (" Data %s digabung dalam satu laporan; jumlah mahasiswa dihitung sebagai NIM unik di semua semester, "
@@ -4102,6 +4282,7 @@ order = sorted(range(len(act_files)), key=lambda i: (period_sort_key(act_files.a
                                                      act_files.at[i, "_file"], act_files.at[i, "_i"]))
 act_files = act_files.iloc[order].reset_index(drop=True)
 act_files["No"] = range(1, len(act_files) + 1)
+act_files = mark_superseded(act_files)
 source_note = "\n".join(notes)
 periods_all = sorted_periods(act_files["Periode Akademik"].unique())
 
@@ -4127,13 +4308,18 @@ with st.sidebar:
         raw = raw_files
     all_status = sorted(act_all["Status Aktivitas"].unique())
     default_drop = []
-    for s in ["Ditolak", "Dibatalkan"]:
-        if s in all_status:
+    for s in all_status:
+        if s in ["Ditolak", "Dibatalkan"] or is_dup_status(s):
             default_drop.append(s)
-    drop_status = st.multiselect("Buang status aktivitas", all_status, default=default_drop)
+    drop_status = st.multiselect("Buang status aktivitas", all_status, default=default_drop,
+                                 help="'(duplikat)' = pengajuan Diajukan/Evaluasi yang mengonversi MK yang sama dengan "
+                                      "aktivitas Selesai milik mahasiswa yang sama pada semester yang sama.")
     mk_overload = st.number_input("Ambang MK berlebih (F2)", min_value=1, max_value=50, value=5)
     mk_overload_px = st.number_input("Ambang MK berlebih - Pertukaran Pelajar (F2)",
                                      min_value=1, max_value=60, value=12)
+    cohort_text = st.text_input("Hitung mahasiswa per awal NIM", value=", ".join(DEFAULT_COHORTS),
+                                help="Contoh: 22, 23. Dipakai di tab Ringkasan dan di laporan.")
+    cohorts = parse_cohorts(cohort_text)
     lang_pick = st.radio("Bahasa laporan naratif", list(LANGS.keys()), horizontal=True)
     lang = LANGS[lang_pick]
     n_split = count_split_records(raw)
@@ -4146,6 +4332,13 @@ with st.sidebar:
         st.caption("File asli: %d baris (1 baris per aktivitas × MK konversi)." % len(raw))
     if n_split:
         st.caption("%d record terpecah (urutan nama dosen berbeda) sudah digabung." % n_split)
+    n_dup = 0
+    for s in act_all["Status Aktivitas"]:
+        if is_dup_status(s):
+            n_dup += 1
+    if n_dup:
+        st.caption("%d pengajuan ganda (MK sama dengan aktivitas Selesai di semester yang sama) diberi status "
+                   "'(duplikat)'." % n_dup)
     for line in notes:
         st.caption(line)
 
@@ -4170,7 +4363,7 @@ n_dropped = len(act_all) - len(act)
 n_issue = int(pd.concat([flags[k] for k in RECORD_FLAGS], axis=1).any(axis=1).sum())
 meta = {"source_note": source_note, "drop_status": drop_status, "n_dropped": n_dropped,
         "mk_overload": mk_overload, "mk_overload_px": mk_overload_px, "n_split": n_split,
-        "periode": periode, "act_all": act_all, "periods": periods_sel}
+        "periode": periode, "act_all": act_all, "periods": periods_sel, "cohorts": cohorts}
 
 cats = partner_categories(act, flags)
 narr = narrative_content(act, raw, flags, nim_info, meta, cats, lang)
@@ -4300,6 +4493,11 @@ with tabs["Ringkasan"]:
         for k in flag_names:
             fc[k] = int(flags[k].sum())
         st.pyplot(barh(pd.Series(fc), RED, "Jumlah aktivitas ter-flag"))
+    if cohorts:
+        st.subheader("Mahasiswa per awal NIM")
+        st.dataframe(cohort_table(act, cohorts, periods), use_container_width=False, hide_index=True)
+        st.caption("NIM unik setelah filter status.%s" % (" Kolom Total menghitung NIM unik di seluruh semester."
+                                                          if multi_sem else ""))
 
 if multi_sem:
     with tabs["Per Semester"]:
