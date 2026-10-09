@@ -158,6 +158,47 @@ def with_uncounted(act, unc):
     return pd.concat([act, unc], ignore_index=True)
 
 
+def first_period_map(sub):
+    """NIM -> semester pertama ia tercatat (dalam data 'sub')."""
+    first = {}
+    for nim, per in zip(sub["NIM"], sub["Periode Akademik"]):
+        if nim not in first or period_sort_key(per) < period_sort_key(first[nim]):
+            first[nim] = per
+    return first
+
+
+def first_period_counts(sub, periods):
+    """Mahasiswa per semester bila setiap NIM dihitung sekali, yaitu pada semester pertama ia tercatat;
+    jumlah semua semester = jumlah NIM unik."""
+    counts = {}
+    for p in periods:
+        counts[p] = 0
+    first = first_period_map(sub)
+    for nim in first:
+        counts[first[nim]] = counts.get(first[nim], 0) + 1
+    return counts
+
+
+def counted_before(sub, periods):
+    """Per semester: jumlah peserta yang sudah dihitung pada semester sebelumnya (semester pertama = None)."""
+    first = first_period_map(sub)
+    out = []
+    for i, p in enumerate(periods):
+        if i == 0:
+            out.append(None)
+            continue
+        part = sub[sub["Periode Akademik"] == p]
+        out.append(int(part.loc[part["NIM"].map(first) != p, "NIM"].nunique()))
+    return out
+
+
+def counted_in(sub, period):
+    """Baris 'sub' pada semester ini milik mahasiswa yang dihitung pada semester ini (semester pertamanya)."""
+    first = first_period_map(sub)
+    part = sub[sub["Periode Akademik"] == period]
+    return part[part["NIM"].map(first) == period]
+
+
 DEFAULT_COHORTS = ["22", "23"]
 
 
@@ -195,7 +236,7 @@ def cohort_table(act, prefixes, periods):
     groups = []
     if len(periods) > 1:
         for p in periods:
-            groups.append((p, act[act["Periode Akademik"] == p]))
+            groups.append((p, counted_in(act, p)))
         groups.append(("Total", act))
     else:
         groups.append(("Mahasiswa", act))
@@ -656,37 +697,22 @@ def rekap_table(act, by):
     return pd.concat([table, total], ignore_index=True)
 
 
-def rekap_sem(act, by, periods):
-    """Rekap per kategori untuk setiap semester + Total (mahasiswa = NIM unik)."""
-    order = list(rekap(act, by).index)
+def rekap_sem_act(act, by, periods, label=None):
+    """Jumlah aktivitas per kategori untuk setiap semester + Total (Total = jumlah semua semester)."""
+    counts = act.groupby(by).size()
+    order = sorted(counts.index, key=lambda c: (-int(counts[c]), str(c)))
     rows = []
     for cat in order + [None]:
-        if cat is None:
-            sub = act
-        else:
-            sub = act[act[by] == cat]
-        row = {by: "TOTAL" if cat is None else cat}
+        sub = act if cat is None else act[act[by] == cat]
+        name = "TOTAL"
+        if cat is not None:
+            name = label(cat) if label else cat
+        row = {by: name}
         for p in periods:
-            part = sub[sub["Periode Akademik"] == p]
-            row["%s · Aktivitas" % p] = len(part)
-            row["%s · Mahasiswa" % p] = int(part["NIM"].nunique())
-        row["Total · Aktivitas"] = len(sub)
-        row["Total · Mahasiswa"] = int(sub["NIM"].nunique())
+            row[p] = int((sub["Periode Akademik"] == p).sum())
+        row["Total"] = len(sub)
         rows.append(row)
     return pd.DataFrame(rows)
-
-
-def rekap_sem_display(act, by, periods, label):
-    """rekap_sem dengan label kategori yang ringkas (baris TOTAL tetap)."""
-    table = rekap_sem(act, by, periods)
-    names = []
-    for value in table[by]:
-        if value == "TOTAL":
-            names.append(value)
-        else:
-            names.append(label(value))
-    table[by] = names
-    return table
 
 
 def student_matrix(act, lang="id"):
@@ -894,8 +920,8 @@ def build_excel(act, flags, nim_info, act_all=None, drop_status=None):
         if multi_sem:
             cats = partner_categories(act, flags)
             semester_compare_table(act, cats, flags, "id", uncounted_records(act_all, drop_status)).to_excel(xl, sheet_name="Per Semester", index=False)
-            rekap_sem(act, "Jenis Aktivitas", periods).to_excel(xl, sheet_name="Per Jenis", index=False)
-            rekap_sem(act, "Program Studi", periods).to_excel(xl, sheet_name="Per Prodi", index=False)
+            rekap_sem_act(act, "Jenis Aktivitas", periods).to_excel(xl, sheet_name="Per Jenis", index=False)
+            rekap_sem_act(act, "Program Studi", periods).to_excel(xl, sheet_name="Per Prodi", index=False)
         else:
             rekap_table(act, "Jenis Aktivitas").to_excel(xl, sheet_name="Per Jenis", index=False)
             rekap_table(act, "Program Studi").to_excel(xl, sheet_name="Per Prodi", index=False)
@@ -1048,13 +1074,12 @@ def build_pdf(act, raw, flags, nim_info, meta):
     if multi_sem:
         act_all = meta.get("act_all")
         cross = nim_info["cross"]
-        sum_sem = 0
+        firsts = first_period_counts(act, periods)
         per = {"act": [], "stu": [], "dup": [], "raw": [], "drop": [], "issue": []}
         for p in periods:
             sub = act[act["Periode Akademik"] == p]
-            sum_sem += sub["NIM"].nunique()
             per["act"].append(str(len(sub)))
-            per["stu"].append(str(sub["NIM"].nunique()))
+            per["stu"].append(str(firsts[p]))
             per["dup"].append(str(int((multi["Semester"] == p).sum())))
             per["raw"].append(str(int((raw["Periode Akademik"] == p).sum())))
             dropped = 0
@@ -1063,17 +1088,23 @@ def build_pdf(act, raw, flags, nim_info, meta):
                                & act_all["Status Aktivitas"].isin(meta["drop_status"])).sum())
             per["drop"].append(str(dropped))
             per["issue"].append(str(int(flags.loc[sub.index, RECORD_FLAGS].any(axis=1).sum())))
-        dashes = []
-        for p in periods:
-            dashes.append("-")
+        again = []
+        n_again = 0
+        for k in counted_before(act, periods):
+            if k is None:
+                again.append("-")
+            else:
+                again.append(str(k))
+                n_again += k
 
         # 1. Ringkasan per semester
         rows = [["Metrik"] + periods + ["Total"]]
         for label, values, total in (
                 ("Jumlah aktivitas (setelah filter)", per["act"], str(n_act)),
-                ("Jumlah mahasiswa (NIM unik)", per["stu"], str(n_stu))) + cohort_pdf_rows(act, meta, periods) + (
+                ("Jumlah mahasiswa (NIM unik, dihitung sekali)", per["stu"], str(n_stu)),
+                ("Mahasiswa yang sudah dihitung di semester sebelumnya", again, str(n_again))) + cohort_pdf_rows(
+                act, meta, periods) + (
                 ("NIM dengan >1 aktivitas dalam semester yang sama", per["dup"], str(len(multi))),
-                ("Mahasiswa di lebih dari satu semester", dashes, str(len(cross))),
                 ("Baris pada file ekspor asli", per["raw"], str(len(raw))),
                 ("Record dikecualikan (%s)" % (", ".join(meta["drop_status"]) or "-"), per["drop"],
                  str(meta["n_dropped"])),
@@ -1088,10 +1119,16 @@ def build_pdf(act, raw, flags, nim_info, meta):
         style.add("ALIGN", (1, 0), (-1, 0), "CENTER")
         style.add("FONTNAME", (-1, 1), (-1, -1), "Helvetica-Bold")
         t.setStyle(style)
-        if len(cross):
-            note = ("Kolom Total menghitung mahasiswa sebagai NIM unik di seluruh semester: %d mahasiswa tercatat di "
-                    "lebih dari satu semester, sehingga Total (%d) lebih kecil daripada penjumlahan per semester (%d)."
-                    % (len(cross), n_stu, sum_sem))
+        if n_again:
+            joined = []
+            for i, p in enumerate(periods):
+                if again[i] not in ("-", "0"):
+                    joined.append("%s: %s + %s = %d peserta" % (p, per["stu"][i], again[i],
+                                                                 int(per["stu"][i]) + int(again[i])))
+            note = ("Setiap mahasiswa dihitung satu kali, yaitu pada semester pertama ia tercatat, sehingga jumlah "
+                    "mahasiswa per semester dijumlahkan menjadi Total (%d). Mahasiswa yang mengikuti MBKM lagi pada "
+                    "semester berikutnya ditampilkan pada baris \"sudah dihitung di semester sebelumnya\" (%s)."
+                    % (n_stu, "; ".join(joined)))
         else:
             note = "Tidak ada mahasiswa yang tercatat di lebih dari satu semester."
         if len(multi):
@@ -1099,52 +1136,31 @@ def build_pdf(act, raw, flags, nim_info, meta):
                      % multi["NIM"].nunique())
         section("1. Ringkasan Umum", [t, Paragraph(note, SMALL)])
 
-        # 2 & 3. Rekap per jenis / per prodi, per semester
+        # 2 & 3. Rekap per jenis / per prodi: jumlah aktivitas per semester
         def semester_rekap(by, header, label):
-            df = rekap_sem(act, by, periods)
-            groups = list(periods) + ["Total"]
-            head1 = [header]
-            head2 = [""]
-            for g in groups:
-                head1.append(g)
-                head1.append("")
-                head2.append("Akt.")
-                head2.append("Mhs.")
-            rows = [head1, head2]
+            df = rekap_sem_act(act, by, periods, label)
+            rows = [[header] + list(periods) + ["Total"]]
             for _, r in df.iterrows():
                 is_total = r[by] == "TOTAL"
-                name = "TOTAL" if is_total else label(r[by])
-                row = [Paragraph(esc(name), CELLB if is_total else CELL)]
+                row = [Paragraph(esc(r[by]), CELLB if is_total else CELL)]
                 for p in periods:
-                    row.append(str(int(r["%s · Aktivitas" % p])))
-                    row.append(str(int(r["%s · Mahasiswa" % p])))
-                row.append(str(int(r["Total · Aktivitas"])))
-                row.append(str(int(r["Total · Mahasiswa"])))
+                    row.append(str(int(r[p])))
+                row.append(str(int(r["Total"])))
                 rows.append(row)
-            label_w = 57
-            each = (165.0 - label_w) / (2 * len(groups))
-            widths = [label_w]
-            for c in range(2 * len(groups)):
-                widths.append(each)
-            t = Table(rows, colWidths=mm_list(widths), repeatRows=2)
-            cmds = [("BACKGROUND", (0, 0), (-1, 1), navy), ("TEXTCOLOR", (0, 0), (-1, 1), colors.white),
-                    ("FONTNAME", (0, 0), (-1, 1), "Helvetica-Bold"), ("FONTNAME", (0, 2), (-1, -1), "Helvetica"),
-                    ("FONTSIZE", (0, 0), (-1, -1), 8.2), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                    ("ALIGN", (1, 0), (-1, -1), "CENTER"),
-                    ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 5), ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-                    ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#BFBFBF")),
-                    ("ROWBACKGROUNDS", (0, 2), (-1, -1), [colors.white, light]),
-                    ("SPAN", (0, 0), (0, 1)),
-                    ("FONTNAME", (-2, 2), (-1, -1), "Helvetica-Bold"),
-                    ("BACKGROUND", (0, -1), (-1, -1), grey), ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold")]
-            for gi in range(len(groups)):
-                cmds.append(("SPAN", (1 + 2 * gi, 0), (2 + 2 * gi, 0)))
-            t.setStyle(TableStyle(cmds))
+            widths = [75]
+            for c in range(len(periods) + 1):
+                widths.append(90.0 / (len(periods) + 1))
+            t = Table(rows, colWidths=mm_list(widths), repeatRows=1)
+            style = tstyle(numeric_cols=value_cols(len(periods) + 1))
+            style.add("ALIGN", (1, 0), (-1, 0), "CENTER")
+            style.add("FONTNAME", (-1, 1), (-1, -1), "Helvetica-Bold")
+            style.add("BACKGROUND", (0, -1), (-1, -1), grey)
+            style.add("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold")
+            t.setStyle(style)
             return t
 
-        legend = Paragraph("Akt. = jumlah aktivitas; Mhs. = jumlah mahasiswa (NIM unik). Kolom Total menghitung NIM "
-                           "unik di seluruh semester.", SMALL)
+        legend = Paragraph("Angka = jumlah aktivitas (setelah filter). Kolom Total = jumlah aktivitas semua semester.",
+                           SMALL)
         section("2. Rekap per Jenis Aktivitas", [semester_rekap("Jenis Aktivitas", "Jenis Aktivitas", short_jenis),
                                                  legend])
         section("3. Rekap per Program Studi", [semester_rekap("Program Studi", "Program Studi", prodi_label), legend])
@@ -1424,7 +1440,7 @@ def cohort_pdf_rows(act, meta, periods):
         values = []
         if len(periods) > 1:
             for per in periods:
-                counts, o = cohort_counts(act[act["Periode Akademik"] == per], [p])
+                counts, o = cohort_counts(counted_in(act, per), [p])
                 values.append(str(counts[p]))
         out.append(("Mahasiswa dengan NIM berawalan %s" % p, values, str(totals[p])))
     return tuple(out)
@@ -1520,8 +1536,10 @@ FIG_CAPTIONS = {
         "prodi_jenis": "Gambar {n}. Jumlah aktivitas per program studi menurut jenis aktivitas. Angka di dalam batang "
                        "= jumlah aktivitas per jenis; angka di ujung batang = total aktivitas (jumlah mahasiswa "
                        "ditampilkan bila berbeda).",
-        "sem_prodi": "Gambar {n}. Jumlah mahasiswa per program studi pada setiap semester (NIM unik dalam semester).",
-        "sem_jenis": "Gambar {n}. Jumlah mahasiswa per jenis aktivitas pada setiap semester (NIM unik dalam semester).",
+        "sem_prodi": ("Gambar {n}. Jumlah mahasiswa per program studi pada setiap semester. Mahasiswa yang mengikuti "
+                      "MBKM di kedua semester dihitung sekali, pada semester pertamanya."),
+        "sem_jenis": ("Gambar {n}. Jumlah mahasiswa per jenis aktivitas pada setiap semester. Mahasiswa yang mengikuti "
+                      "MBKM di kedua semester dihitung sekali, pada semester pertamanya."),
         "prodi_mitra": "Gambar {n}. Kategori mitra per program studi (jumlah aktivitas). Aktivitas internal i3L tidak "
                        "memerlukan MoU.",
         "jenis_status": "Gambar {n}. Status aktivitas per jenis aktivitas. Angka di ujung batang = total aktivitas "
@@ -1532,8 +1550,10 @@ FIG_CAPTIONS = {
         "prodi_jenis": "Figure {n}. Number of activities per study program by activity type. Numbers inside the bars "
                        "= activities per type; number at the end of each bar = total activities (number of students "
                        "shown when different).",
-        "sem_prodi": "Figure {n}. Number of students per study program in each semester (unique NIM per semester).",
-        "sem_jenis": "Figure {n}. Number of students per activity type in each semester (unique NIM per semester).",
+        "sem_prodi": ("Figure {n}. Number of students per study program in each semester. Students who took part "
+                      "in both semesters are counted once, in their first semester."),
+        "sem_jenis": ("Figure {n}. Number of students per activity type in each semester. Students who took part "
+                      "in both semesters are counted once, in their first semester."),
         "prodi_mitra": "Figure {n}. Partner category per study program (number of activities). Internal i3L "
                        "activities do not require an MoU.",
         "jenis_status": "Figure {n}. Activity status per activity type. Number at the end of each bar = total "
@@ -1559,10 +1579,10 @@ TABLE_CAPTIONS = {
     },
 }
 COMPARE_ROWS = {
-    "id": ["Mahasiswa (NIM unik)", "Aktivitas", "Program studi", "Aktivitas selesai", "Aktivitas belum selesai",
+    "id": ["Mahasiswa (NIM unik, dihitung sekali)", "Aktivitas", "Program studi", "Aktivitas selesai", "Aktivitas belum selesai",
            "Mitra eksternal", "Aktivitas bermitra eksternal", "– di antaranya ber-MoU", "Aktivitas internal i3L",
            "Total SKS dikonversi", "Rata-rata SKS per aktivitas", "Aktivitas dengan isu data per-record"],
-    "en": ["Students (unique NIM)", "Activities", "Study programs", "Completed activities", "Not yet completed",
+    "en": ["Students (unique NIM, counted once)", "Activities", "Study programs", "Completed activities", "Not yet completed",
            "External partners", "Activities with external partners", "– of which with MoU", "Internal i3L activities",
            "Total credits (SKS) converted", "Average credits per activity", "Activities with record-level data issues"],
 }
@@ -2973,8 +2993,9 @@ def method_paragraph(meta, lang, periods=None):
         extra = ""
         if multi:
             extra = (" Data for %s are combined in one report; students are counted as unique NIMs across all "
-                     "semesters, so a student who took part in more than one semester is counted once in the totals "
-                     "but in each semester in the semester comparison. Flag F7 compares activities within the same "
+                     "semesters, and a student who took part in more than one semester is counted once, in the first "
+                     "semester in which they appear, so the semester figures add up to the total. Flag F7 compares "
+                     "activities within the same "
                      "semester only; F8 marks the same course converted in more than one semester."
                      % join(periods, "en"))
         return ("Data source: the SIAKAD export \"Laporan Aktivitas MBKM dan Mata Kuliah Konversi\"%s. Each row of "
@@ -3000,8 +3021,9 @@ def method_paragraph(meta, lang, periods=None):
     extra = ""
     if multi:
         extra = (" Data %s digabung dalam satu laporan; jumlah mahasiswa dihitung sebagai NIM unik di semua semester, "
-                 "sehingga mahasiswa yang mengikuti MBKM di lebih dari satu semester dihitung satu kali pada angka "
-                 "total, tetapi dihitung di setiap semester pada perbandingan semester. Flag F7 hanya membandingkan "
+                 "dan mahasiswa yang mengikuti MBKM di lebih dari satu semester dihitung satu kali, yaitu pada semester "
+                 "pertama ia tercatat, sehingga angka per semester dijumlahkan menjadi angka total. Flag F7 hanya "
+                 "membandingkan "
                  "aktivitas dalam semester yang sama; F8 menandai MK yang sama yang dikonversi pada lebih dari satu "
                  "semester." % join(periods, "id"))
     return ("Data bersumber dari ekspor SIAKAD \"Laporan Aktivitas MBKM dan Mata Kuliah Konversi\"%s. "
@@ -3121,10 +3143,13 @@ def semester_compare_table(act, cats, flags, lang, unc=None):
     ay = academic_year(periods)
     columns = ["Indicator" if lang == "en" else "Indikator"]
     values = []
+    firsts = first_period_counts(act, periods)
     for p in periods:
         columns.append(sem_label(p, lang, ay, "col"))
-        values.append(compare_values(act[act["Periode Akademik"] == p], cats, flags, lang,
-                                     unc_part(unc, "Periode Akademik", p)))
+        col_values = compare_values(act[act["Periode Akademik"] == p], cats, flags, lang,
+                                    unc_part(unc, "Periode Akademik", p))
+        col_values[0] = num(firsts[p], lang)
+        values.append(col_values)
     total = "Total"
     if ay:
         total = ("Total %s" % ay) if lang == "en" else ("Total TA %s" % ay)
@@ -3140,15 +3165,48 @@ def semester_compare_table(act, cats, flags, lang, unc=None):
         for col_values in values:
             row.append(col_values[i])
         rows.append(row)
+    again = counted_before(act, periods)
+    n_again = 0
+    again_row = ["– already counted in an earlier semester" if lang == "en"
+                 else "– sudah dihitung di semester sebelumnya"]
+    for k in again:
+        if k is None:
+            again_row.append("-")
+        else:
+            again_row.append(num(k, lang))
+            n_again += k
+    again_row.append(num(n_again, lang))
+    if n_again:
+        rows.insert(1, again_row)
     return pd.DataFrame(rows, columns=columns)
 
 
-def top_by_semester(subs, col, label, lang, ay, kind):
-    """Kalimat kategori dengan peserta terbanyak di setiap semester. kind: 'prodi' atau 'jenis'."""
+def top_by_semester(subs, col, label, lang, ay, kind, act=None):
+    """Kalimat kategori dengan peserta terbanyak di setiap semester. kind: 'prodi' atau 'jenis'.
+
+    Bila 'act' diberikan, mahasiswa dihitung sekali per kategori, pada semester pertama ia tercatat."""
     en = lang == "en"
-    tops = []
+    periods = []
     for p, sub in subs:
-        counts = ranked(sub.groupby(col)["NIM"].nunique())
+        periods.append(p)
+    per_cat = {}
+    if act is not None:
+        for cat in act[col].unique():
+            per_cat[cat] = first_period_counts(act[act[col] == cat], periods)
+    tops = []
+    skipped = False
+    for p, sub in subs:
+        if act is not None:
+            values = {}
+            for cat in per_cat:
+                if per_cat[cat][p]:
+                    values[cat] = per_cat[cat][p]
+            counts = ranked(values)
+        else:
+            counts = ranked(sub.groupby(col)["NIM"].nunique())
+        if not counts:
+            skipped = True
+            continue
         top_n = counts[0][1]
         names = []
         for name, n in counts:
@@ -3156,7 +3214,7 @@ def top_by_semester(subs, col, label, lang, ay, kind):
                 names.append(label(name))
         tops.append((p, names, top_n))
     first_names = tops[0][1]
-    same = len(first_names) == 1
+    same = len(first_names) == 1 and not skipped
     for p, names, n in tops:
         if names != first_names:
             same = False
@@ -3210,14 +3268,37 @@ def semester_section(act, cats, flags, lang, numbers, unc=None):
     for p in periods:
         subs.append((p, act[act["Periode Akademik"] == p]))
 
-    # 1. gambaran umum
+    # 1. gambaran umum (mahasiswa dihitung sekali, pada semester pertama ia tercatat)
+    first = first_period_map(act)
+    firsts = first_period_counts(act, periods)
     items = []
     for p, sub in subs:
         where = sem_label(p, lang, ay, "text")
-        if en:
-            items.append("%s recorded %s in %s" % (where, studs(sub["NIM"].nunique(), lang), acts(len(sub), lang)))
+        n_new = firsts[p]
+        old_rows = sub[sub["NIM"].map(first) != p]
+        n_old_act = len(old_rows)
+        n_old_stu = old_rows["NIM"].nunique()
+        earlier = []
+        for nim in old_rows["NIM"].unique():
+            if first[nim] not in earlier:
+                earlier.append(first[nim])
+        if len(earlier) == 1:
+            before = sem_label(earlier[0], lang, ay, "text")
         else:
-            items.append("%s mencatat %d mahasiswa dalam %d aktivitas" % (where, sub["NIM"].nunique(), len(sub)))
+            before = "an earlier semester" if en else "semester sebelumnya"
+        if en:
+            if n_old_stu:
+                items.append("%s recorded %d new %s in %s (%d of these %s to %s already counted in %s)"
+                             % (where, n_new, plural(n_new, "student", "students"), acts(len(sub), lang), n_old_act,
+                                plural(n_old_act, "belongs", "belong"), studs(n_old_stu, lang), before))
+            else:
+                items.append("%s recorded %s in %s" % (where, studs(n_new, lang), acts(len(sub), lang)))
+        elif n_old_stu:
+            owner = "mahasiswa" if n_old_stu == 1 else "%d mahasiswa" % n_old_stu
+            items.append("%s mencatat %d mahasiswa baru dalam %d aktivitas (%d aktivitas milik %s yang sudah dihitung "
+                         "pada %s)" % (where, n_new, len(sub), n_old_act, owner, before))
+        else:
+            items.append("%s mencatat %d mahasiswa dalam %d aktivitas" % (where, n_new, len(sub)))
     if len(items) == 2:
         overview = items[0] + (", while " if en else ", sedangkan ") + items[1] + "."
     else:
@@ -3239,8 +3320,8 @@ def semester_section(act, cats, flags, lang, numbers, unc=None):
     if len(subs) == 2:
         pa, sa = subs[0]
         pb, sb = subs[1]
-        na = sa["NIM"].nunique()
-        nb = sb["NIM"].nunique()
+        na = firsts[pa]
+        nb = firsts[pb]
         a = sem_label(pa, lang, ay, "text")
         b = sem_label(pb, lang, ay, "text")
         diff = nb - na
@@ -3291,8 +3372,8 @@ def semester_section(act, cats, flags, lang, numbers, unc=None):
     def jenis_text(name):
         return jenis_long(name, lang)
 
-    p_mix += " " + top_by_semester(subs, "Program Studi", prodi_label, lang, ay, "prodi")
-    p_mix += " " + top_by_semester(subs, "Jenis Aktivitas", jenis_text, lang, ay, "jenis")
+    p_mix += " " + top_by_semester(subs, "Program Studi", prodi_label, lang, ay, "prodi", act)
+    p_mix += " " + top_by_semester(subs, "Jenis Aktivitas", jenis_text, lang, ay, "jenis", act)
 
     # 3. penyelesaian, MoU, SKS
     done_items = []
@@ -3331,9 +3412,6 @@ def semester_section(act, cats, flags, lang, numbers, unc=None):
 
     # 4. mahasiswa lintas semester
     cross = cross_semester_table(act, lang)
-    sum_sem = 0
-    for p, sub in subs:
-        sum_sem += sub["NIM"].nunique()
     n_unique = act["NIM"].nunique()
     if len(cross) == 0:
         p_cross = ("No student took part in MBKM in %s." % both) if en else (
@@ -3344,14 +3422,16 @@ def semester_section(act, cats, flags, lang, numbers, unc=None):
         same_rows = cross[cross[same_col] != "-"]
         if en:
             lead = "One student" if len(cross) == 1 else "A total of %d students" % len(cross)
-            p_cross = ("%s took part in MBKM in %s, so %s counts %d unique students rather than the %d obtained by "
-                       "adding the semesters. They are listed in Table %d."
-                       % (lead, both, scope, n_unique, sum_sem, numbers["t_cross"]))
+            p_cross = ("%s took part in MBKM in %s and %s counted once, in the first semester in which %s "
+                       "appeared, so the semester figures add up to %d unique students in %s. %s listed in Table %d."
+                       % (lead, both, plural(len(cross), "is", "are"), plural(len(cross), "the student", "they"),
+                          n_unique, scope, plural(len(cross), "The student is", "They are"), numbers["t_cross"]))
         else:
             lead = "Satu mahasiswa" if len(cross) == 1 else "Sebanyak %d mahasiswa" % len(cross)
-            p_cross = ("%s mengikuti MBKM di %s, sehingga jumlah mahasiswa unik pada %s adalah %d, bukan %d seperti "
-                       "hasil penjumlahan per semester. Daftarnya tercantum pada Tabel %d."
-                       % (lead, both, scope, n_unique, sum_sem, numbers["t_cross"]))
+            p_cross = ("%s mengikuti MBKM di %s dan dihitung satu kali, yaitu pada semester pertama %s tercatat, "
+                       "sehingga jumlah mahasiswa per semester dijumlahkan menjadi %d mahasiswa pada %s. Daftarnya "
+                       "tercantum pada Tabel %d." % (lead, both, "ia" if len(cross) == 1 else "mereka", n_unique, scope,
+                                                     numbers["t_cross"]))
         if len(same_rows):
             names = []
             for _, r in same_rows.head(8).iterrows():
@@ -3368,7 +3448,12 @@ def semester_section(act, cats, flags, lang, numbers, unc=None):
                             "ditandai F8 dan perlu diverifikasi agar satu MK tidak dikonversi dua kali."
                             % (len(same_rows), both, join(names, lang)))
         elif en:
-            p_cross += " None of them converted the same course in %s." % both
+            if len(cross) == 1:
+                p_cross += " This student did not convert the same course in %s." % both
+            else:
+                p_cross += " None of them converted the same course in %s." % both
+        elif len(cross) == 1:
+            p_cross += " Mahasiswa tersebut tidak mengonversi MK yang sama pada %s." % both
         else:
             p_cross += " Tidak ada di antaranya yang mengonversi MK yang sama pada %s." % both
     return {"paras": [p_overview, p_mix, p_rates, p_cross],
@@ -3744,9 +3829,9 @@ def narrative_charts(act, cats, lang, unc=None):
             index = []
             for cat in order:
                 row = []
+                firsts = first_period_counts(act[act[by] == cat], periods)
                 for p in periods:
-                    part = act[(act[by] == cat) & (act["Periode Akademik"] == p)]
-                    row.append(int(part["NIM"].nunique()))
+                    row.append(int(firsts[p]))
                 rows.append(row)
                 index.append(label_of(cat))
             table = pd.DataFrame(rows, index=index, columns=series)
@@ -4442,6 +4527,7 @@ st.caption("Supported by Claude Opus 4.8 (Anthropic PBC, San Francisco, Californ
 UPLOAD_TYPES = ["xls", "xlsx", "html", "htm"]
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+ONCE_NOTE = "Mahasiswa yang tercatat di lebih dari satu semester dihitung sekali, pada semester pertamanya."
 PENDING_TAB = {"id": "Mahasiswa Status Selain Selesai", "en": "Students with a Status Other than Completed"}
 
 st.markdown("**File ekspor SIAKAD** - unggah file Semester Ganjil, Semester Genap, atau keduanya "
@@ -4741,25 +4827,28 @@ with tabs["Ringkasan"]:
     if cohorts:
         st.subheader("Mahasiswa per awal NIM")
         st.dataframe(cohort_table(act, cohorts, periods), use_container_width=False, hide_index=True)
-        st.caption("NIM unik setelah filter status.%s" % (" Kolom Total menghitung NIM unik di seluruh semester."
-                                                          if multi_sem else ""))
+        st.caption("NIM unik setelah filter status.%s" % ((" " + ONCE_NOTE) if multi_sem else ""))
 
 if multi_sem:
     with tabs["Per Semester"]:
         st.subheader("Perbandingan semester")
         compare = semester_compare_table(act, cats, flags, "id", uncounted)
         st.dataframe(compare, use_container_width=True, hide_index=True, height=(len(compare) + 1) * 35 + 3)
+        st.caption(ONCE_NOTE + " Program studi dan mitra dihitung per semester, sehingga kolom semester tidak "
+                   "selalu dijumlahkan menjadi Total.")
         st.download_button("⬇️ Unduh perbandingan semester (CSV)", compare.to_csv(index=False).encode("utf-8"),
                            file_name="%s_perbandingan_semester.csv" % stem, mime="text/csv", key="dl_sem_compare")
         charts_id = narrative_charts(act, cats, "id", uncounted)
         st.image(charts_id["sem_prodi"],
-                 caption="Jumlah mahasiswa per program studi pada setiap semester (NIM unik dalam semester).")
+                 caption="Jumlah mahasiswa per program studi pada setiap semester. " + ONCE_NOTE)
         st.image(charts_id["sem_jenis"],
-                 caption="Jumlah mahasiswa per jenis aktivitas pada setiap semester (NIM unik dalam semester).")
-        st.markdown("**Rekap per program studi dan semester**")
-        st.dataframe(rekap_sem_display(act, "Program Studi", periods, prodi_label), use_container_width=True,
+                 caption="Jumlah mahasiswa per jenis aktivitas pada setiap semester. " + ONCE_NOTE)
+        st.markdown("**Jumlah aktivitas per program studi dan semester**")
+        st.dataframe(rekap_sem_act(act, "Program Studi", periods, prodi_label), use_container_width=True,
                      hide_index=True)
-        st.caption("Kolom Total menghitung mahasiswa sebagai NIM unik di seluruh semester.")
+        st.markdown("**Jumlah aktivitas per jenis aktivitas dan semester**")
+        st.dataframe(rekap_sem_act(act, "Jenis Aktivitas", periods, short_jenis), use_container_width=True,
+                     hide_index=True)
         st.divider()
         cross = nim_info["cross"]
         st.markdown("**Mahasiswa yang mengikuti MBKM di lebih dari satu semester**")
@@ -4783,8 +4872,8 @@ with tabs["Per Jenis"]:
     stu_j.index = labels
     st.pyplot(barh(stu_j, NAVY, "Mahasiswa per Jenis Aktivitas"))
     if multi_sem:
-        st.markdown("**Per semester**")
-        st.dataframe(rekap_sem_display(act, "Jenis Aktivitas", periods, short_jenis), use_container_width=True,
+        st.markdown("**Jumlah aktivitas per semester**")
+        st.dataframe(rekap_sem_act(act, "Jenis Aktivitas", periods, short_jenis), use_container_width=True,
                      hide_index=True)
     jenis_pick = st.selectbox("Lihat daftar mahasiswa untuk Jenis Aktivitas",
                               act["Jenis Aktivitas"].value_counts().index)
@@ -4801,7 +4890,7 @@ with tabs["Per Program Studi"]:
 
     # --- tabel rekap + unduh ---
     if multi_sem:
-        rekap_p = rekap_sem_display(act, "Program Studi", periods, prodi_label)
+        rekap_p = rekap_sem_act(act, "Program Studi", periods, prodi_label)
     else:
         rekap_p = rekap_table(act, "Program Studi")
         labels = []
@@ -4816,13 +4905,13 @@ with tabs["Per Program Studi"]:
     stu_chart.index = labels
     st.pyplot(barh(stu_chart, NAVY, "Mahasiswa per Program Studi"))
 
-    st.dataframe(rekap_p, use_container_width=True, hide_index=True)
     if multi_sem:
-        st.caption("Kolom Total menghitung mahasiswa sebagai NIM unik di seluruh semester.")
+        st.markdown("**Jumlah aktivitas per semester**")
+    st.dataframe(rekap_p, use_container_width=True, hide_index=True)
     st.download_button("⬇️ Unduh rekap per Program Studi (CSV)",
                        rekap_p.to_csv(index=False).encode("utf-8"),
-                       file_name="rekap_mahasiswa_per_prodi.csv", mime="text/csv",
-                       key="dl_rekap_prodi")
+                       file_name="rekap_aktivitas_per_prodi.csv" if multi_sem else "rekap_mahasiswa_per_prodi.csv",
+                       mime="text/csv", key="dl_rekap_prodi")
 
     st.divider()
 
@@ -4985,6 +5074,8 @@ with tabs["Matriks"]:
     st.caption("Angka = jumlah mahasiswa (NIM unik). Mahasiswa dengan aktivitas di lebih dari 1 jenis "
                "dihitung di tiap jenis, tetapi sekali di kolom/baris Total.")
     if multi_sem:
+        st.caption("Matriks per semester di bawah menghitung semua peserta pada semester itu, termasuk mahasiswa yang "
+                   "sudah dihitung pada semester sebelumnya.")
         for p in periods:
             st.markdown("**%s**" % p)
             st.dataframe(student_matrix(act[act["Periode Akademik"] == p]), use_container_width=True)
