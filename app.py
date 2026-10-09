@@ -2763,6 +2763,10 @@ except Exception as exc:  # noqa
     st.stop()
 
 with st.sidebar:
+    st.header("🔍 Cari mahasiswa")
+    query = st.text_input("Nama atau NIM (boleh sebagian)", placeholder="contoh: ellen atau 22010173",
+                          key="search_q", help="Mencari di semua record file, termasuk yang dibuang filter status.")
+    st.divider()
     st.header("Filter")
     all_status = sorted(act_all["Status Aktivitas"].unique())
     default_drop = []
@@ -2824,30 +2828,13 @@ m1.metric("Aktivitas", n_act)
 # m4.metric("Dikecualikan", n_dropped)
 # m5.metric("Isu per-record", n_issue)
 
-PENDING_TAB = {"id": "Mahasiswa Status Selain Selesai", "en": "Students with a Status Other than Completed"}
-tab_sum, tab_search, tab_jenis, tab_prodi, tab_flag, tab_nim, tab_pending, tab_matrix, tab_narr, tab_dl = st.tabs(
-    ["Ringkasan", "🔍 Cari Mahasiswa", "Per Jenis", "Per Program Studi", "Flag", "Cek NIM", PENDING_TAB[lang],
-     "Matriks", "Narasi", "Unduh"])
-
-with tab_sum:
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Status Aktivitas")
-        st.pyplot(barh(act["Status Aktivitas"].value_counts(), NAVY, "Status aktivitas"))
-    with c2:
-        st.subheader("Flag")
-        fc = {}
-        for k in FLAG_COLS:
-            fc[k] = int(flags[k].sum())
-        st.pyplot(barh(pd.Series(fc), RED, "Jumlah aktivitas ter-flag"))
-
-with tab_search:
-    st.subheader("Cari mahasiswa")
-    query = st.text_input("Nama atau NIM (boleh sebagian, tidak membedakan huruf besar/kecil)",
-                          placeholder="contoh: ellen, sutjiawan, atau 22010173", key="search_q")
-    if not query.strip():
-        st.caption("Pencarian mencakup semua record di file, termasuk yang dibuang oleh filter status.")
-    else:
+if query.strip():
+    try:
+        search_box = st.container(border=True)
+    except TypeError:  # Streamlit lama tanpa opsi border
+        search_box = st.container()
+    with search_box:
+        st.markdown("#### 🔍 Hasil pencarian: \"%s\"" % md_escape(query.strip()))
         q = query.strip().lower()
         by_name = act_all["Nama"].str.lower().str.contains(q, regex=False)
         by_nim = act_all["NIM"].str.contains(re.sub(r"\s+", "", q), regex=False)
@@ -2904,6 +2891,24 @@ with tab_search:
                            "dalam jumlah mahasiswa.")
             elif len(kept) > 1:
                 st.warning("Mahasiswa ini tercatat pada lebih dari satu aktivitas (F7) - periksa kemungkinan duplikasi.")
+
+
+PENDING_TAB = {"id": "Mahasiswa Status Selain Selesai", "en": "Students with a Status Other than Completed"}
+tab_sum, tab_jenis, tab_prodi, tab_flag, tab_nim, tab_pending, tab_matrix, tab_narr, tab_dl = st.tabs(
+    ["Ringkasan", "Per Jenis", "Per Program Studi", "Flag", "Cek NIM", PENDING_TAB[lang], "Matriks", "Narasi",
+     "Unduh"])
+
+with tab_sum:
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Status Aktivitas")
+        st.pyplot(barh(act["Status Aktivitas"].value_counts(), NAVY, "Status aktivitas"))
+    with c2:
+        st.subheader("Flag")
+        fc = {}
+        for k in FLAG_COLS:
+            fc[k] = int(flags[k].sum())
+        st.pyplot(barh(pd.Series(fc), RED, "Jumlah aktivitas ter-flag"))
 
 with tab_jenis:
     st.subheader("Rekap mahasiswa per Jenis Aktivitas")
