@@ -2824,7 +2824,7 @@ m1.metric("Aktivitas", n_act)
 # m4.metric("Dikecualikan", n_dropped)
 # m5.metric("Isu per-record", n_issue)
 
-PENDING_TAB = {"id": "Mahasiswa Status Selain Selesai", "en": "Students with a Status Other than Completed"}
+PENDING_TAB = {"id": "Tidak Selesai", "en": "Non-Completed"}
 tab_sum, tab_jenis, tab_prodi, tab_flag, tab_nim, tab_pending, tab_matrix, tab_narr, tab_dl = st.tabs(
     ["Ringkasan", "Per Jenis", "Per Program Studi", "Flag", "Cek NIM", PENDING_TAB[lang], "Matriks", "Narasi",
      "Unduh"])
