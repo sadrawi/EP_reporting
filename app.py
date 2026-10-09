@@ -2770,7 +2770,7 @@ with st.sidebar:
     st.header("Filter")
     all_status = sorted(act_all["Status Aktivitas"].unique())
     default_drop = []
-    for s in ["Ditolak", "Dibatalkan, "Diajukan"]:
+    for s in ["Ditolak", "Dibatalkan", "Diajukan"]:
         if s in all_status:
             default_drop.append(s)
     drop_status = st.multiselect("Buang status aktivitas", all_status, default=default_drop)
